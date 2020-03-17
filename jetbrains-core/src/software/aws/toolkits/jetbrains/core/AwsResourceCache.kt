@@ -3,6 +3,7 @@
 
 package software.aws.toolkits.jetbrains.core
 
+import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.ServiceManager
 import com.intellij.openapi.project.Project
@@ -10,12 +11,17 @@ import com.intellij.util.Alarm
 import com.intellij.util.AlarmFactory
 import software.amazon.awssdk.core.SdkClient
 import software.aws.toolkits.core.credentials.ToolkitCredentialsChangeListener
+import software.aws.toolkits.core.credentials.ToolkitCredentialsIdentifier
 import software.aws.toolkits.core.credentials.ToolkitCredentialsProvider
 import software.aws.toolkits.core.region.AwsRegion
 import software.aws.toolkits.core.utils.getLogger
 import software.aws.toolkits.core.utils.warn
 import software.aws.toolkits.jetbrains.core.credentials.CredentialManager
 import software.aws.toolkits.jetbrains.core.credentials.ProjectAccountSettingsManager
+import software.aws.toolkits.jetbrains.core.credentials.toEnvironmentVariables
+import software.aws.toolkits.jetbrains.core.executables.ExecutableInstance
+import software.aws.toolkits.jetbrains.core.executables.ExecutableManager
+import software.aws.toolkits.jetbrains.core.executables.ExecutableType
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -115,7 +121,10 @@ interface AwsResourceCache {
         @JvmStatic
         fun getInstance(project: Project): AwsResourceCache = ServiceManager.getService(project, AwsResourceCache::class.java)
 
-        private val DEFAULT_TIMEOUT = Duration.ofSeconds(5)
+        // Getting resources can take a long time on a slow connection or if there are a lot of resources. This call should
+        // always be done in an async context so it should be OK to take multiple seconds.
+        private val DEFAULT_TIMEOUT = Duration.ofSeconds(30)
+
         private fun <T> wait(timeout: Duration, call: () -> CompletionStage<T>) = try {
             call().toCompletableFuture().get(timeout.toMillis(), TimeUnit.MILLISECONDS)
         } catch (e: ExecutionException) {
@@ -175,6 +184,35 @@ class ClientBackedCachedResource<ReturnType, ClientType : SdkClient>(
 
     override fun expiry(): Duration = expiry ?: super.expiry()
     override fun toString(): String = "ClientBackedCachedResource(id='$id')"
+}
+
+class ExecutableBackedCacheResource<ReturnType, ExecType : ExecutableType<*>>(
+    private val executableTypeClass: KClass<ExecType>,
+    override val id: String,
+    private val expiry: Duration? = null,
+    private val fetchCall: GeneralCommandLine.() -> ReturnType
+) : Resource.Cached<ReturnType>() {
+
+    override fun fetch(project: Project, region: AwsRegion, credentials: ToolkitCredentialsProvider): ReturnType {
+        val executableType = ExecutableType.getExecutable(executableTypeClass.java)
+
+        val executable = ExecutableManager.getInstance().getExecutableIfPresent(executableType).let {
+            when (it) {
+                is ExecutableInstance.Executable -> it
+                is ExecutableInstance.InvalidExecutable, is ExecutableInstance.UnresolvedExecutable ->
+                    throw IllegalStateException((it as ExecutableInstance.BadExecutable).validationError)
+            }
+        }
+
+        return fetchCall(
+            executable.getCommandLine()
+                .withEnvironment(region.toEnvironmentVariables())
+                .withEnvironment(credentials.resolveCredentials().toEnvironmentVariables())
+        )
+    }
+
+    override fun expiry(): Duration = expiry ?: super.expiry()
+    override fun toString(): String = "ExecutableBackedCacheResource(id='$id')"
 }
 
 class DefaultAwsResourceCache(
@@ -277,9 +315,9 @@ class DefaultAwsResourceCache(
         cache.clear()
     }
 
-    override fun providerRemoved(providerId: String) = clearByCredential(providerId)
+    override fun providerRemoved(identifier: ToolkitCredentialsIdentifier) = clearByCredential(identifier.id)
 
-    override fun providerModified(provider: ToolkitCredentialsProvider) = clearByCredential(provider.id)
+    override fun providerModified(identifier: ToolkitCredentialsIdentifier) = clearByCredential(identifier.id)
 
     private fun clearByCredential(providerId: String) {
         cache.keys.removeIf { it.credentialsId == providerId }

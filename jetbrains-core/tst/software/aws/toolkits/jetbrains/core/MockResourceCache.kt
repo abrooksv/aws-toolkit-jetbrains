@@ -29,7 +29,7 @@ class MockResourceCache(private val project: Project) : AwsResourceCache {
         credentialProvider: ToolkitCredentialsProvider,
         useStale: Boolean
     ): T? = when (resource) {
-        is Resource.View<*, T> -> getResourceIfPresent(resource.underlying)?.let { resource.doMap(it) }
+        is Resource.View<*, T> -> getResourceIfPresent(resource.underlying, region, credentialProvider)?.let { resource.doMap(it) }
         is Resource.Cached<T> -> mockResourceIfPresent(resource, region, credentialProvider)
     }
 
@@ -43,8 +43,10 @@ class MockResourceCache(private val project: Project) : AwsResourceCache {
         useStale: Boolean,
         forceFetch: Boolean
     ): CompletionStage<T> = when (resource) {
-        is Resource.View<*, T> -> getResource(resource.underlying, useStale, forceFetch).thenApply { resource.doMap(it as Any) }
-        is Resource.Cached<T> -> { mockResource(resource, region, credentialProvider) }
+        is Resource.View<*, T> -> getResource(resource.underlying, region, credentialProvider, useStale, forceFetch).thenApply { resource.doMap(it as Any) }
+        is Resource.Cached<T> -> {
+            mockResource(resource, region, credentialProvider)
+        }
     }
 
     private fun <T> mockResourceIfPresent(
@@ -65,7 +67,8 @@ class MockResourceCache(private val project: Project) : AwsResourceCache {
         else -> {
             val future = CompletableFuture<T>()
             ApplicationManager.getApplication().executeOnPooledThread {
-                value?.also { future.complete(it as T) } ?: future.completeExceptionally(IllegalStateException("No value found for $resource ${region.id} ${credentials.id} in mock"))
+                value?.also { future.complete(it as T) }
+                    ?: future.completeExceptionally(IllegalStateException("No value found for $resource ${region.id} ${credentials.id} in mock"))
             }
             future
         }

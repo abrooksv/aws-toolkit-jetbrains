@@ -8,7 +8,6 @@ import com.intellij.execution.process.ProcessAdapter
 import com.intellij.execution.process.ProcessEvent
 import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.process.ProcessHandlerFactory
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.extensions.ExtensionPointName
 import com.intellij.openapi.module.Module
@@ -17,15 +16,17 @@ import com.intellij.openapi.util.Key
 import com.intellij.openapi.util.io.FileUtil
 import com.intellij.psi.PsiElement
 import com.intellij.util.io.Compressor
-import com.intellij.util.text.SemVer
 import software.amazon.awssdk.services.lambda.model.Runtime
 import software.aws.toolkits.core.utils.exists
 import software.aws.toolkits.core.utils.getLogger
 import software.aws.toolkits.core.utils.info
+import software.aws.toolkits.jetbrains.core.executables.ExecutableInstance
+import software.aws.toolkits.jetbrains.core.executables.ExecutableManager
+import software.aws.toolkits.jetbrains.core.executables.getExecutable
+import software.aws.toolkits.jetbrains.services.PathMapping
 import software.aws.toolkits.jetbrains.services.lambda.LambdaLimits.DEFAULT_MEMORY_SIZE
 import software.aws.toolkits.jetbrains.services.lambda.LambdaLimits.DEFAULT_TIMEOUT
-import software.aws.toolkits.jetbrains.services.lambda.execution.PathMapping
-import software.aws.toolkits.jetbrains.services.lambda.sam.SamCommon
+import software.aws.toolkits.jetbrains.services.lambda.sam.SamExecutable
 import software.aws.toolkits.jetbrains.services.lambda.sam.SamOptions
 import software.aws.toolkits.jetbrains.services.lambda.sam.SamTemplateUtils
 import software.aws.toolkits.resources.message
@@ -92,11 +93,20 @@ abstract class LambdaBuilder {
                 )
         }
 
-        ApplicationManager.getApplication().executeOnPooledThread {
+        ExecutableManager.getInstance().getExecutable<SamExecutable>().thenApply {
+            val samExecutable = when (it) {
+                is ExecutableInstance.Executable -> it
+                else -> {
+                    future.completeExceptionally(RuntimeException((it as? ExecutableInstance.BadExecutable)?.validationError ?: ""))
+                    return@thenApply
+                }
+            }
+
             val buildDir = getOrCreateBuildDirectory(module).toPath()
 
-            val commandLine = SamCommon.getSamCommandLine()
+            val commandLine = samExecutable.getCommandLine()
                 .withParameters("build")
+                .withParameters(logicalId)
                 .withParameters("--template")
                 .withParameters(templateLocation.toString())
                 .withParameters("--build-dir")
@@ -123,13 +133,6 @@ abstract class LambdaBuilder {
                 }
             }
 
-            // TODO: FIX_WHEN_SAM_MIN_IS_0.16
-            SemVer.parseFromText(SamCommon.getVersionString())?.let {
-                if (it.isGreaterOrEqualThan(0, 16, 0)) {
-                    commandLine.withParameters(logicalId)
-                }
-            }
-
             val pathMappings = listOf(
                 PathMapping(templateLocation.parent.resolve(codeLocation).toString(), "/"),
                 PathMapping(buildDir.resolve(logicalId).toString(), "/")
@@ -140,10 +143,6 @@ abstract class LambdaBuilder {
                 override fun onTextAvailable(event: ProcessEvent, outputType: Key<*>) {
                     // TODO: We should find a way to show the output of this in the UI
                     LOG.info { event.text }
-
-                    if (ApplicationManager.getApplication().isUnitTestMode) {
-                        println("SAM CLI: ${event.text}")
-                    }
                 }
 
                 override fun processTerminated(event: ProcessEvent) {

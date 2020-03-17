@@ -1,4 +1,4 @@
-// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 package software.aws.toolkits.jetbrains.services.lambda.deploy;
@@ -27,7 +27,7 @@ import javax.swing.JTextField;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import software.aws.toolkits.jetbrains.services.cloudformation.Parameter;
-import software.aws.toolkits.jetbrains.services.s3.S3Resources;
+import software.aws.toolkits.jetbrains.services.s3.resources.S3Resources;
 import software.aws.toolkits.jetbrains.ui.ResourceSelector;
 
 @SuppressWarnings("NullableProblems")
@@ -88,8 +88,8 @@ public class DeployServerlessApplicationPanel {
     private void createUIComponents() {
         environmentVariablesTable = new EnvVariablesTable();
         stackParameters = new Wrapper();
-        stacks = new ResourceSelector<>(project, ACTIVE_STACKS);
-        s3Bucket = new ResourceSelector<>(project, S3Resources.listBucketsByActiveRegion(project));
+        stacks = ResourceSelector.builder(project).resource(ACTIVE_STACKS).build();
+        s3Bucket = ResourceSelector.builder(project).resource(S3Resources.listBucketNamesByActiveRegion(project)).build();
 
         if (!ApplicationManager.getApplication().isUnitTestMode()) {
             JComponent tableComponent = environmentVariablesTable.getComponent();

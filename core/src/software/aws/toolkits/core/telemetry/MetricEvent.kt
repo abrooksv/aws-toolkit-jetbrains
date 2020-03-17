@@ -10,15 +10,12 @@ import java.time.Instant
 import software.amazon.awssdk.services.toolkittelemetry.model.Unit as MetricUnit
 
 interface MetricEvent {
-    val namespace: String
     val createTime: Instant
     val awsAccount: String
     val awsRegion: String
     val data: Iterable<Datum>
 
     interface Builder {
-        fun namespace(namespace: String): Builder
-
         fun createTime(createTime: Instant): Builder
 
         fun awsAccount(awsAccount: String): Builder
@@ -65,23 +62,17 @@ interface MetricEvent {
 fun String.replaceIllegal(replacement: String = "") = this.replace(illegalCharsRegex, replacement)
 
 class DefaultMetricEvent internal constructor(
-    override val namespace: String,
     override val createTime: Instant,
     override val awsAccount: String,
     override val awsRegion: String,
     override val data: Iterable<MetricEvent.Datum>
 ) : MetricEvent {
 
-    class BuilderImpl(private var namespace: String) : MetricEvent.Builder {
+    class BuilderImpl : MetricEvent.Builder {
         private var createTime: Instant = Instant.now()
         private var awsAccount: String = METADATA_NA
         private var awsRegion: String = METADATA_NA
         private var data: MutableCollection<MetricEvent.Datum> = mutableListOf()
-
-        override fun namespace(namespace: String): MetricEvent.Builder {
-            this.namespace = namespace
-            return this
-        }
 
         override fun createTime(createTime: Instant): MetricEvent.Builder {
             this.createTime = createTime
@@ -105,15 +96,17 @@ class DefaultMetricEvent internal constructor(
             return this
         }
 
-        override fun build(): MetricEvent = DefaultMetricEvent(namespace.replaceIllegal(), createTime, awsAccount, awsRegion, data)
+        override fun build(): MetricEvent = DefaultMetricEvent(createTime, awsAccount, awsRegion, data)
     }
 
     companion object {
-        fun builder(namespace: String): MetricEvent.Builder = BuilderImpl(namespace)
+        fun builder() = BuilderImpl()
 
         const val METADATA_NA = "n/a"
         const val METADATA_NOT_SET = "not-set"
         const val METADATA_INVALID = "invalid"
+
+        private val LOG = getLogger<DefaultDatum>()
     }
 
     class DefaultDatum(

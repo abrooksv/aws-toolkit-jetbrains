@@ -13,9 +13,7 @@ import software.amazon.awssdk.services.lambda.model.FunctionCode
 import software.amazon.awssdk.services.lambda.model.UpdateFunctionCodeRequest
 import software.amazon.awssdk.services.lambda.model.UpdateFunctionConfigurationRequest
 import software.amazon.awssdk.services.s3.S3Client
-import software.amazon.awssdk.services.s3.model.PutObjectRequest
 import software.aws.toolkits.core.ToolkitClientManager
-import software.aws.toolkits.jetbrains.core.credentials.ProjectAccountSettingsManager
 import software.aws.toolkits.jetbrains.services.lambda.LambdaBuilder
 import software.aws.toolkits.jetbrains.services.lambda.LambdaBuilderUtils
 import software.aws.toolkits.jetbrains.services.lambda.LambdaFunction
@@ -23,6 +21,7 @@ import software.aws.toolkits.jetbrains.services.lambda.PackageLambdaFromHandler
 import software.aws.toolkits.jetbrains.services.lambda.runtimeGroup
 import software.aws.toolkits.jetbrains.services.lambda.sam.SamOptions
 import software.aws.toolkits.jetbrains.services.lambda.toDataClass
+import software.aws.toolkits.jetbrains.services.s3.upload
 import software.aws.toolkits.resources.message
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
@@ -47,8 +46,8 @@ class LambdaCreator internal constructor(
         functionDetails: FunctionUploadDetails,
         s3Bucket: String
     ): CompletionStage<LambdaFunction> = packageLambda(handler, functionDetails, module, builder)
-        .thenCompose { uploader.upload(functionDetails, it, s3Bucket) }
-        .thenCompose { functionCreator.create(module.project, functionDetails, it) }
+        .thenCompose { uploader.upload(functionDetails, it, s3Bucket, module.project) }
+        .thenCompose { functionCreator.create(functionDetails, it) }
 
     fun updateLambda(
         module: Module,
@@ -57,7 +56,7 @@ class LambdaCreator internal constructor(
         s3Bucket: String,
         replaceConfiguration: Boolean = true
     ): CompletionStage<Nothing> = packageLambda(handler, functionDetails, module, builder)
-        .thenCompose { uploader.upload(functionDetails, it, s3Bucket) }
+        .thenCompose { uploader.upload(functionDetails, it, s3Bucket, module.project) }
         .thenCompose { functionCreator.update(functionDetails, it, replaceConfiguration) }
 
     private fun packageLambda(
@@ -82,11 +81,7 @@ class LambdaCreator internal constructor(
 }
 
 class LambdaFunctionCreator(private val lambdaClient: LambdaClient) {
-    fun create(
-        project: Project,
-        details: FunctionUploadDetails,
-        uploadedCode: UploadedCode
-    ): CompletionStage<LambdaFunction> {
+    fun create(details: FunctionUploadDetails, uploadedCode: UploadedCode): CompletionStage<LambdaFunction> {
         val future = CompletableFuture<LambdaFunction>()
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
@@ -109,14 +104,8 @@ class LambdaFunctionCreator(private val lambdaClient: LambdaClient) {
                     }
                     .build()
 
-                val settingsManager = ProjectAccountSettingsManager.getInstance(project)
                 val result = lambdaClient.createFunction(req)
-                future.complete(
-                    result.toDataClass(
-                        settingsManager.activeCredentialProvider.id,
-                        settingsManager.activeRegion
-                    )
-                )
+                future.complete(result.toDataClass())
             } catch (e: Exception) {
                 future.completeExceptionally(e)
             }
@@ -185,20 +174,13 @@ class CodeUploader(private val s3Client: S3Client) {
     fun upload(
         functionDetails: FunctionUploadDetails,
         code: Path,
-        s3Bucket: String
+        s3Bucket: String,
+        project: Project
     ): CompletionStage<UploadedCode> {
-        val future = CompletableFuture<UploadedCode>()
-        ApplicationManager.getApplication().executeOnPooledThread {
-            try {
-                val key = "${functionDetails.name}.zip"
-                val por = PutObjectRequest.builder().bucket(s3Bucket).key(key).build()
-                val result = s3Client.putObject(por, code)
-                future.complete(UploadedCode(s3Bucket, key, result.versionId()))
-            } catch (e: Exception) {
-                future.completeExceptionally(RuntimeException(message("lambda.create.failed_to_upload"), e))
-            }
+        val key = "${functionDetails.name}.zip"
+        return s3Client.upload(project, code, s3Bucket, key, message = message("lambda.create.uploading"), startInBackground = true).thenApply { result ->
+            UploadedCode(s3Bucket, key, result.versionId())
         }
-        return future
     }
 }
 

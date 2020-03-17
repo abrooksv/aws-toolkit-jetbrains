@@ -5,7 +5,7 @@ package software.aws.toolkits.jetbrains.core
 
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
-import com.intellij.testFramework.PlatformTestCase
+import com.intellij.openapi.project.ex.ProjectManagerEx
 import com.intellij.testFramework.ProjectRule
 import com.intellij.testFramework.runInEdtAndWait
 import org.assertj.core.api.Assertions.assertThat
@@ -15,7 +15,6 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials
 import software.amazon.awssdk.awscore.client.builder.AwsClientBuilder
 import software.amazon.awssdk.awscore.client.builder.AwsDefaultClientBuilder
 import software.amazon.awssdk.core.SdkClient
@@ -24,10 +23,14 @@ import software.amazon.awssdk.core.client.config.SdkClientOption
 import software.amazon.awssdk.core.signer.Signer
 import software.amazon.awssdk.http.SdkHttpClient
 import software.aws.toolkits.core.region.AwsRegion
+import software.aws.toolkits.jetbrains.core.credentials.ConnectionState
 import software.aws.toolkits.jetbrains.core.credentials.CredentialManager
 import software.aws.toolkits.jetbrains.core.credentials.MockCredentialsManager
 import software.aws.toolkits.jetbrains.core.credentials.MockProjectAccountSettingsManager
-import software.aws.toolkits.jetbrains.core.credentials.ProjectAccountSettingsManager
+import software.aws.toolkits.jetbrains.core.region.MockRegionProvider
+import software.aws.toolkits.jetbrains.utils.CompatibilityUtils.createProject
+import software.aws.toolkits.jetbrains.utils.spinUntil
+import java.time.Duration
 import kotlin.reflect.full.declaredMemberProperties
 import kotlin.reflect.jvm.isAccessible
 
@@ -46,6 +49,8 @@ class AwsClientManagerTest {
     @Before
     fun setUp() {
         mockCredentialManager = MockCredentialsManager.getInstance()
+        mockCredentialManager.reset()
+        MockProjectAccountSettingsManager.getInstance(projectRule.project).reset()
     }
 
     @After
@@ -73,23 +78,17 @@ class AwsClientManagerTest {
     @Test
     fun oldClientsAreRemovedWhenProfilesAreRemoved() {
         val sut = getClientManager()
-        val testSettings = MockProjectAccountSettingsManager.getInstance(projectRule.project)
-        MockResourceCache.getInstance(projectRule.project).addValidAwsCredential(testSettings.activeRegion.id, "profile:admin", "111111111111")
-        testSettings.changeCredentialProvider(
-            mockCredentialManager.addCredentials(
-                "profile:admin",
-                AwsBasicCredentials.create("Access", "Secret")
-            )
-        )
 
-        sut.getClient<DummyServiceClient>()
+        val credentialsIdentifier = mockCredentialManager.addCredentials("profile:admin")
+        val credentialProvider = mockCredentialManager.getAwsCredentialProvider(credentialsIdentifier, MockRegionProvider.getInstance().defaultRegion())
+
+        sut.getClient<DummyServiceClient>(credentialProvider)
 
         assertThat(sut.cachedClients().keys).anySatisfy {
             it.credentialProviderId == "profile:admin"
         }
 
-        ApplicationManager.getApplication().messageBus.syncPublisher(CredentialManager.CREDENTIALS_CHANGED)
-            .providerRemoved("profile:admin")
+        ApplicationManager.getApplication().messageBus.syncPublisher(CredentialManager.CREDENTIALS_CHANGED).providerRemoved(credentialsIdentifier)
 
         assertThat(sut.cachedClients().keys).noneSatisfy {
             it.credentialProviderId == "profile:admin"
@@ -98,12 +97,18 @@ class AwsClientManagerTest {
 
     @Test
     fun clientsAreClosedWhenProjectIsDisposed() {
-        val project = PlatformTestCase.createProject(temporaryDirectory.newFolder(), "Fake project")
+        val project = createProject(temporaryDirectory.newFolder().toPath())
+        val projectManager = ProjectManagerEx.getInstanceEx()
+
+        runInEdtAndWait {
+            projectManager.openTestProject(project)
+        }
+
         val sut = getClientManager(project)
         val client = sut.getClient<DummyServiceClient>()
 
         runInEdtAndWait {
-            PlatformTestCase.closeAndDisposeProjectAndCheckThatNoOpenProjects(project)
+            projectManager.closeAndDispose(project)
         }
 
         assertThat(client.closed).isTrue()
@@ -132,8 +137,10 @@ class AwsClientManagerTest {
         val sut = getClientManager()
         val first = sut.getClient<DummyServiceClient>()
 
-        val testSettings = ProjectAccountSettingsManager.getInstance(projectRule.project)
-        testSettings.changeRegion(AwsRegion("us-west-2", "us-west-2"))
+        val testSettings = MockProjectAccountSettingsManager.getInstance(projectRule.project)
+        testSettings.changeRegionAndWait(AwsRegion("us-west-2", "us-west-2", "aws"))
+
+        spinUntil(Duration.ofSeconds(10)) { testSettings.connectionState == ConnectionState.VALID || testSettings.connectionState == ConnectionState.INVALID }
 
         val afterRegionUpdate = sut.getClient<DummyServiceClient>()
 
@@ -205,7 +212,9 @@ class AwsClientManagerTest {
     private val SdkHttpClient.delegate: SdkHttpClient
         get() {
             val delegateProperty = this::class.declaredMemberProperties.find { it.name == "delegate" }
-                ?: throw IllegalArgumentException("Expected instance of software.amazon.awssdk.core.client.builder.SdkDefaultClientBuilder.NonManagedSdkHttpClient")
+                ?: throw IllegalArgumentException(
+                    "Expected instance of software.amazon.awssdk.core.client.builder.SdkDefaultClientBuilder.NonManagedSdkHttpClient"
+                )
             delegateProperty.isAccessible = true
             return delegateProperty.call(this) as SdkHttpClient
         }

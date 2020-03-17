@@ -10,17 +10,20 @@ import com.intellij.execution.process.ProcessHandlerFactory
 import com.intellij.execution.runners.ExecutionEnvironment
 import com.intellij.openapi.util.io.FileUtil
 import software.aws.toolkits.jetbrains.core.credentials.toEnvironmentVariables
+import software.aws.toolkits.jetbrains.core.executables.ExecutableInstance
+import software.aws.toolkits.jetbrains.core.executables.ExecutableManager
+import software.aws.toolkits.jetbrains.core.executables.getExecutableIfPresent
 import software.aws.toolkits.jetbrains.services.lambda.BuiltLambda
-import software.aws.toolkits.jetbrains.services.lambda.sam.SamCommon
+import software.aws.toolkits.jetbrains.services.lambda.sam.SamExecutable
 
 class SamRunningState(
     environment: ExecutionEnvironment,
     val settings: LocalLambdaRunSettings
 ) : CommandLineState(environment) {
-    internal lateinit var builtLambda: BuiltLambda
+    lateinit var builtLambda: BuiltLambda
 
-    internal val runner = if (environment.executor.id == DefaultDebugExecutor.EXECUTOR_ID) {
-        SamDebugger()
+    val runner = if (environment.executor.id == DefaultDebugExecutor.EXECUTOR_ID) {
+        SamDebugger(settings.runtimeGroup)
     } else {
         SamRunner()
     }
@@ -30,14 +33,20 @@ class SamRunningState(
         totalEnvVars += settings.credentials.resolveCredentials().toEnvironmentVariables()
         totalEnvVars += settings.region.toEnvironmentVariables()
 
-        val commandLine = SamCommon.getSamCommandLine()
+        val samExecutable = ExecutableManager.getInstance().getExecutableIfPresent<SamExecutable>().let {
+            when (it) {
+                is ExecutableInstance.Executable -> it
+                else -> throw RuntimeException((it as? ExecutableInstance.BadExecutable)?.validationError ?: "")
+            }
+        }
+        val commandLine = samExecutable.getCommandLine()
             .withParameters("local")
             .withParameters("invoke")
+            .apply { settings.templateDetails?.run { withParameters(logicalName) } }
             .withParameters("--template")
             .withParameters(builtLambda.templateLocation.toString())
             .withParameters("--event")
             .withParameters(createEventFile())
-            .apply { settings.templateDetails?.run { withParameters(logicalName) } }
             .withEnvironment(totalEnvVars)
             .withEnvironment("PYTHONUNBUFFERED", "1") // Force SAM to not buffer stdout/stderr so it gets shown in IDE
 
@@ -59,7 +68,7 @@ class SamRunningState(
             }
         }
 
-        runner.patchCommandLine(this, commandLine)
+        runner.patchCommandLine(commandLine)
 
         return ProcessHandlerFactory.getInstance().createColoredProcessHandler(commandLine)
     }

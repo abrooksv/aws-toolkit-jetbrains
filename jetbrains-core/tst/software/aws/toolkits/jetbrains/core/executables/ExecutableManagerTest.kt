@@ -5,6 +5,7 @@ package software.aws.toolkits.jetbrains.core.executables
 
 import com.intellij.testFramework.ProjectRule
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.assertj.core.api.ObjectAssert
 import org.junit.Rule
 import org.junit.Test
@@ -14,6 +15,7 @@ import software.aws.toolkits.jetbrains.utils.isInstanceOf
 import software.aws.toolkits.jetbrains.utils.value
 import software.aws.toolkits.jetbrains.utils.wait
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.util.concurrent.atomic.AtomicInteger
 
 class ExecutableManagerTest {
@@ -30,7 +32,7 @@ class ExecutableManagerTest {
     fun nonExistentExecutableIsNotResolved() {
         val type = DummyExecutableType("dummy")
 
-        sut.loadState(listOf(ExecutableState("dummy", "/foo/bar", true)))
+        sut.loadState(ExecutableStateList(listOf(ExecutableState("dummy", "/foo/bar", true))))
 
         assertThat(sut.getExecutable(type)).wait().isCompletedWithValueMatching { it is ExecutableInstance.UnresolvedExecutable }
     }
@@ -91,7 +93,7 @@ class ExecutableManagerTest {
         }
 
         assertThat(sut.getExecutable(type).value).isInstanceOfSatisfying(ExecutableInstance.UnresolvedExecutable::class.java) {
-            assertThat(it.resolutionError).endsWith("blah")
+            assertThat(it.validationError).endsWith("blah")
         }
     }
 
@@ -118,7 +120,7 @@ class ExecutableManagerTest {
             }
         }
 
-        sut.loadState(listOf(ExecutableState(type.id, executable.absolutePath)))
+        sut.loadState(ExecutableStateList(listOf(ExecutableState(type.id, executable.absolutePath))))
 
         assertThat(sut.getExecutable(type).value).isInstanceOfSatisfying(ExecutableInstance.InvalidExecutable::class.java) {
             assertThat(it.executablePath).isEqualTo(executable.toPath())
@@ -159,6 +161,34 @@ class ExecutableManagerTest {
 
         assertThat(sut.getExecutableIfPresent(type)).isInstanceOfSatisfying(ExecutableInstance.Executable::class.java) {
             assertThat(it.executablePath).isEqualTo(executable.toPath())
+        }
+    }
+
+    @Test
+    fun setExecutablePathFailsWhenValidateFails() {
+        val type = object : DummyExecutableType("dummy"), AutoResolvable, Validatable {
+            override fun resolve(): Path? = null
+            override fun validate(path: Path) {
+                throw RuntimeException("ow")
+            }
+        }
+        val executable = "/fake/path////////////"
+
+        sut.setExecutablePath(type, Paths.get(executable)).value
+
+        // as there was not a valid path set, invalid executable is allowed to be set
+        assertThat(sut.getExecutable(type).value).isInstanceOf(ExecutableInstance.InvalidExecutable::class.java)
+    }
+
+    @Test
+    fun executableTypeJavaGetExecutableThrowsWhenNotRegistered() {
+        val type = DummyExecutableType("dummy")
+        val executable = tempFolder.newFile()
+
+        sut.setExecutablePath(type, executable.toPath()).value
+
+        assertThatThrownBy {
+            ExecutableType.getExecutable(type.javaClass)
         }
     }
 

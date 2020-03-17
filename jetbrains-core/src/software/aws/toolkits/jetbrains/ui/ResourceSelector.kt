@@ -7,48 +7,57 @@ import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.runInEdt
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
+import com.intellij.openapi.ui.ComponentValidator
 import com.intellij.openapi.ui.ValidationInfo
+import com.intellij.ui.ColoredListCellRenderer
 import com.intellij.ui.MutableCollectionComboBoxModel
 import com.intellij.util.ExceptionUtil
 import org.jetbrains.annotations.TestOnly
+import software.aws.toolkits.core.credentials.ToolkitCredentialsProvider
+import software.aws.toolkits.core.region.AwsRegion
 import software.aws.toolkits.core.utils.Either
 import software.aws.toolkits.core.utils.getLogger
 import software.aws.toolkits.core.utils.warn
 import software.aws.toolkits.jetbrains.core.AwsResourceCache
 import software.aws.toolkits.jetbrains.core.Resource
-import software.aws.toolkits.jetbrains.utils.CompatibilityUtils
+import software.aws.toolkits.jetbrains.core.credentials.ProjectAccountSettingsManager
 import software.aws.toolkits.jetbrains.utils.notifyError
 import software.aws.toolkits.jetbrains.utils.ui.find
 import software.aws.toolkits.resources.message
+import java.util.concurrent.CancellationException
+import java.util.concurrent.CompletableFuture
+import javax.swing.JList
 
 private typealias Selector<T> = Either<Any?, (T) -> Boolean>
 
+typealias AwsConnection = Pair<AwsRegion, ToolkitCredentialsProvider>
+typealias LazyAwsConnectionEvaluator = () -> AwsConnection
+
 @Suppress("UNCHECKED_CAST")
-class ResourceSelector<T> @JvmOverloads constructor(
+class ResourceSelector<T> private constructor(
     private val project: Project,
     private val resourceType: () -> Resource<out Collection<T>>?,
-    private val autoSelectSingleValue: Boolean = true
-) : ComboBox<T>(MutableCollectionComboBoxModel<T>()) {
-
-    @JvmOverloads
-    constructor(
-        project: Project,
-        resourceType: Resource<out Collection<T>>,
-        autoSelectSingleValue: Boolean = true
-    ) : this(
-        project,
-        { resourceType },
-        autoSelectSingleValue
-    )
+    comboBoxModel: MutableCollectionComboBoxModel<T>,
+    customRenderer: ColoredListCellRenderer<T>?,
+    loadOnCreate: Boolean,
+    private val sortOnLoad: Boolean,
+    private val awsConnection: LazyAwsConnectionEvaluator
+) : ComboBox<T>(comboBoxModel) {
 
     private val resourceCache = AwsResourceCache.getInstance(project)
     @Volatile
     private var loadingStatus: Status = Status.NOT_LOADED
     private var shouldBeEnabled: Boolean = isEnabled
     private var selector: Selector<T>? = null
+    @Volatile
+    private var loadingFuture: CompletableFuture<*>? = null
 
     init {
-        if (isEnabled) {
+        customRenderer?.let {
+            setRenderer(customRenderer)
+        }
+
+        if (loadOnCreate) {
             reload()
         }
     }
@@ -58,19 +67,30 @@ class ResourceSelector<T> @JvmOverloads constructor(
     fun reload(forceFetch: Boolean = false) {
         val previouslySelected = model.selectedItem
         loadingStatus = Status.LOADING
+
+        // If this reload will supersede a previous once, cancel it
+        loadingFuture?.cancel(true)
+
         runInEdt(ModalityState.any()) {
+            loadingStatus = Status.LOADING
             super.setEnabled(false)
             setEditable(true)
+
             super.setSelectedItem(message("loading_resource.loading"))
 
             val resource = resourceType.invoke()
             if (resource == null) {
                 processSuccess(emptyList(), null)
             } else {
-                resourceCache.getResource(resource, forceFetch = forceFetch).whenComplete { value, error ->
+                val (region, credentials) = awsConnection()
+                val resultFuture = resourceCache.getResource(resource, region, credentials, forceFetch = forceFetch).toCompletableFuture()
+                loadingFuture = resultFuture
+                resultFuture.whenComplete { value, error ->
                     when {
-                        value != null -> processSuccess(value, previouslySelected)
+                        error is CancellationException -> {
+                        } // Do nothing, results don't matter
                         error != null -> processFailure(error)
+                        value != null -> processSuccess(value, previouslySelected)
                     }
                 }
             }
@@ -78,8 +98,8 @@ class ResourceSelector<T> @JvmOverloads constructor(
     }
 
     override fun getModel(): MutableCollectionComboBoxModel<T> =
-        // javax.swing.DefaultComboBoxModel.addAll(java.util.Collection<? extends E>) isn't in Java 8
-        // The addElement method can lead to multiple selection events firing as elements are added
+    // javax.swing.DefaultComboBoxModel.addAll(java.util.Collection<? extends E>) isn't in Java 8
+    // The addElement method can lead to multiple selection events firing as elements are added
         // Use IntelliJ's to work around this short coming
         super.getModel() as MutableCollectionComboBoxModel<T>
 
@@ -120,6 +140,9 @@ class ResourceSelector<T> @JvmOverloads constructor(
         }
     }
 
+    val isLoading: Boolean
+        get() = loadingStatus == Status.LOADING
+
     @TestOnly
     fun forceLoaded() {
         loadingStatus = Status.LOADED
@@ -127,18 +150,21 @@ class ResourceSelector<T> @JvmOverloads constructor(
 
     private fun processSuccess(value: Collection<T>, previouslySelected: Any?) {
         runInEdt(ModalityState.any()) {
-            loadingStatus = Status.LOADED
             setEditable(false)
 
-            model.removeAll()
-            model.add(value.sortedBy { it.toString().toLowerCase() })
+            if (sortOnLoad) {
+                model.replaceAll(value.sortedBy { it.toString().toLowerCase() })
+            } else {
+                model.replaceAll(value.toList())
+            }
+            loadingStatus = Status.LOADED
 
             super.setEnabled(shouldBeEnabled)
 
-            if (autoSelectSingleValue && value.size == 1) {
-                super.setSelectedItem(value.first())
-            } else {
-                super.setSelectedItem(determineSelection(selector, previouslySelected))
+            when {
+                value.isEmpty() -> super.setSelectedItem(null)
+                value.size == 1 -> super.setSelectedItem(value.first())
+                else -> super.setSelectedItem(determineSelection(selector, previouslySelected))
             }
         }
     }
@@ -150,7 +176,11 @@ class ResourceSelector<T> @JvmOverloads constructor(
             loadingStatus = Status.NOT_LOADED
             super.setSelectedItem(message)
             notifyError(message, ExceptionUtil.getThrowableText(error), project)
-            CompatibilityUtils.createPopupBuilder(ValidationInfo(error.message ?: message, this), null)?.createPopup()?.showUnderneathOf(this)
+            val validationInfo = ValidationInfo(error.message ?: message, this)
+            ComponentValidator.createPopupBuilder(validationInfo, null)
+                .setCancelOnClickOutside(true)
+                .createPopup()
+                .showUnderneathOf(this)
         }
     }
 
@@ -166,7 +196,74 @@ class ResourceSelector<T> @JvmOverloads constructor(
         LOADED
     }
 
-    private companion object {
-        val LOG = getLogger<ResourceSelector<*>>()
+    companion object {
+        private val LOG = getLogger<ResourceSelector<*>>()
+        @JvmStatic
+        fun builder(project: Project) = object : ResourceBuilder {
+            override fun <T> resource(resource: (() -> Resource<out Collection<T>>?)): ResourceBuilderOptions<T> = ResourceBuilderOptions(project, resource)
+        }
+    }
+
+    interface ResourceBuilder {
+        fun <T> resource(resource: Resource<out Collection<T>>): ResourceBuilderOptions<T> = resource { resource }
+        fun <T> resource(resource: (() -> Resource<out Collection<T>>?)): ResourceBuilderOptions<T>
+    }
+
+    class ResourceBuilderOptions<T> internal constructor(private val project: Project, private val resource: (() -> Resource<out Collection<T>>?)) {
+        private var loadOnCreate = true
+        private var sortOnLoad = true
+        private var comboBoxModel: MutableCollectionComboBoxModel<T> = MutableCollectionComboBoxModel<T>()
+        private var customRendererFunction: ((T, ColoredListCellRenderer<T>) -> ColoredListCellRenderer<T>)? = null
+        private var customRenderer: ColoredListCellRenderer<T>? = null
+        private var awsConnection: LazyAwsConnectionEvaluator? = null
+
+        fun comboBoxModel(comboBoxModel: MutableCollectionComboBoxModel<T>): ResourceBuilderOptions<T> = also {
+            it.comboBoxModel = comboBoxModel
+        }
+
+        fun customRenderer(customRenderer: (T, ColoredListCellRenderer<T>) -> ColoredListCellRenderer<T>): ResourceBuilderOptions<T> = also {
+            if (it.customRenderer != null) {
+                throw IllegalStateException("Please specify either of the customRenderer factory methods, but not both")
+            }
+            it.customRendererFunction = customRenderer
+        }
+
+        fun customRenderer(customRenderer: ColoredListCellRenderer<T>): ResourceBuilderOptions<T> = also {
+            if (it.customRendererFunction != null) {
+                throw IllegalStateException("Please specify either of the customRenderer factory methods, but not both")
+            }
+            it.customRenderer = customRenderer
+        }
+
+        private fun resolveCustomRenderer(): ColoredListCellRenderer<T>? = customRenderer ?: customRendererFunction?.let { renderer ->
+            object : ColoredListCellRenderer<T>() {
+                override fun customizeCellRenderer(
+                    list: JList<out T>,
+                    value: T?,
+                    index: Int,
+                    selected: Boolean,
+                    hasFocus: Boolean
+                ) {
+                    value?.let {
+                        renderer.invoke(it, this)
+                    }
+                }
+            }
+        }
+
+        fun disableAutomaticLoading(): ResourceBuilderOptions<T> = also { it.loadOnCreate = false }
+
+        fun disableAutomaticSorting(): ResourceBuilderOptions<T> = also { it.sortOnLoad = false }
+
+        fun awsConnection(awsConnection: AwsConnection): ResourceBuilderOptions<T> = awsConnection { awsConnection }
+
+        fun awsConnection(awsConnection: LazyAwsConnectionEvaluator): ResourceBuilderOptions<T> = also {
+            it.awsConnection = awsConnection
+        }
+
+        fun build() = ResourceSelector(project, resource, comboBoxModel, resolveCustomRenderer(), loadOnCreate, sortOnLoad, awsConnection ?: {
+            val settings = ProjectAccountSettingsManager.getInstance(project)
+            settings.activeRegion to settings.activeCredentialProvider
+        })
     }
 }

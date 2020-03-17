@@ -9,7 +9,9 @@ import com.intellij.openapi.application.runInEdt
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.module.ModuleUtil
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.ValidationInfo
+import com.intellij.util.ExceptionUtil
 import com.intellij.util.text.nullize
 import com.intellij.util.ui.UIUtil
 import org.jetbrains.annotations.TestOnly
@@ -17,7 +19,6 @@ import software.amazon.awssdk.services.iam.IamClient
 import software.amazon.awssdk.services.lambda.LambdaClient
 import software.amazon.awssdk.services.lambda.model.Runtime
 import software.amazon.awssdk.services.s3.S3Client
-import software.aws.toolkits.jetbrains.components.telemetry.LoggingDialogWrapper
 import software.aws.toolkits.jetbrains.core.AwsClientManager
 import software.aws.toolkits.jetbrains.core.awsClient
 import software.aws.toolkits.jetbrains.core.credentials.ProjectAccountSettingsManager
@@ -42,6 +43,8 @@ import software.aws.toolkits.jetbrains.utils.ui.blankAsNull
 import software.aws.toolkits.jetbrains.utils.ui.selected
 import software.aws.toolkits.jetbrains.utils.ui.validationInfo
 import software.aws.toolkits.resources.message
+import software.aws.toolkits.telemetry.LambdaTelemetry
+import software.aws.toolkits.telemetry.Result
 import java.awt.event.ActionEvent
 import javax.swing.Action
 import javax.swing.JComponent
@@ -64,22 +67,22 @@ class EditFunctionDialog(
     private val memorySize: Int = DEFAULT_MEMORY_SIZE,
     private val xrayEnabled: Boolean = false,
     private val role: IamRole? = null
-) : LoggingDialogWrapper(project) {
+) : DialogWrapper(project) {
 
     constructor(project: Project, lambdaFunction: LambdaFunction, mode: EditFunctionMode = UPDATE_CONFIGURATION) :
-            this(
-                project = project,
-                mode = mode,
-                name = lambdaFunction.name,
-                description = lambdaFunction.description ?: "",
-                runtime = lambdaFunction.runtime,
-                handlerName = lambdaFunction.handler,
-                envVariables = lambdaFunction.envVariables ?: emptyMap(),
-                timeout = lambdaFunction.timeout,
-                memorySize = lambdaFunction.memorySize,
-                xrayEnabled = lambdaFunction.xrayEnabled,
-                role = lambdaFunction.role
-            )
+        this(
+            project = project,
+            mode = mode,
+            name = lambdaFunction.name,
+            description = lambdaFunction.description ?: "",
+            runtime = lambdaFunction.runtime,
+            handlerName = lambdaFunction.handler,
+            envVariables = lambdaFunction.envVariables ?: emptyMap(),
+            timeout = lambdaFunction.timeout,
+            memorySize = lambdaFunction.memorySize,
+            xrayEnabled = lambdaFunction.xrayEnabled,
+            role = lambdaFunction.role
+        )
 
     private val view = EditFunctionPanel(project)
     private val validator = UploadToLambdaValidator()
@@ -102,7 +105,7 @@ class EditFunctionDialog(
 
         view.name.text = name
 
-        view.handler.text = handlerName
+        view.handlerPanel.handler.text = handlerName
         view.timeoutSlider.value = timeout
         view.memorySlider.value = memorySize
         view.description.text = description
@@ -129,7 +132,9 @@ class EditFunctionDialog(
         }
 
         if (mode == UPDATE_CODE) {
-            UIUtil.uiChildren(view.configurationSettings).filter { it !== view.handler && it !== view.handlerLabel }.forEach { it.isVisible = false }
+            UIUtil.uiChildren(view.configurationSettings)
+                .filter { it !== view.handlerPanel && it !== view.handlerLabel }
+                .forEach { it.isVisible = false }
         }
 
         view.setRuntimes(Runtime.knownValues())
@@ -163,7 +168,7 @@ class EditFunctionDialog(
     private fun configurationChanged(): Boolean = mode != NEW && !(name == view.name.text &&
         description == view.description.text &&
         runtime == view.runtime.selected() &&
-        handlerName == view.handler.text &&
+        handlerName == view.handlerPanel.handler.text &&
         envVariables.entries == view.envVars.envVars.entries &&
         timeout == view.timeoutSlider.value &&
         memorySize == view.memorySlider.value &&
@@ -181,6 +186,11 @@ class EditFunctionDialog(
     }
 
     override fun getOKAction(): Action = action
+
+    override fun doCancelAction() {
+        LambdaTelemetry.editFunction(project, result = Result.CANCELLED)
+        super.doCancelAction()
+    }
 
     override fun doOKAction() {
         // Do nothing, close logic is handled separately
@@ -217,8 +227,14 @@ class EditFunctionDialog(
 
             future.whenComplete { _, error ->
                 when (error) {
-                    null -> notifyInfo(title = NOTIFICATION_TITLE, content = message, project = project)
-                    is Exception -> error.notifyError(title = NOTIFICATION_TITLE)
+                    null -> {
+                        notifyInfo(title = NOTIFICATION_TITLE, content = message, project = project)
+                        LambdaTelemetry.editFunction(project, update = false, result = Result.SUCCEEDED)
+                    }
+                    is Exception -> {
+                        error.notifyError(title = NOTIFICATION_TITLE)
+                        LambdaTelemetry.editFunction(project, update = false, result = Result.FAILED)
+                    }
                 }
             }
             close(OK_EXIT_CODE)
@@ -233,15 +249,17 @@ class EditFunctionDialog(
 
             ApplicationManager.getApplication().executeOnPooledThread {
                 LambdaFunctionCreator(lambdaClient).update(functionDetails)
-                    .thenAccept { runInEdt(ModalityState.any()) { close(OK_EXIT_CODE) } }
-                    .whenComplete { _, error ->
-                        when (error) {
-                            null -> notifyInfo(
-                                title = NOTIFICATION_TITLE,
-                                content = message("lambda.function.configuration_updated.notification", functionDetails.name)
-                            )
-                            is Exception -> error.notifyError(title = NOTIFICATION_TITLE)
-                        }
+                    .thenAccept {
+                        notifyInfo(
+                            title = NOTIFICATION_TITLE,
+                            content = message("lambda.function.configuration_updated.notification", functionDetails.name)
+                        )
+                        runInEdt(ModalityState.any()) { close(OK_EXIT_CODE) }
+                        LambdaTelemetry.editFunction(project, update = true, result = Result.SUCCEEDED)
+                    }.exceptionally { error ->
+                        setErrorText(ExceptionUtil.getNonEmptyMessage(error, error.toString()))
+                        LambdaTelemetry.editFunction(project, update = true, result = Result.FAILED)
+                        null
                     }
             }
         }
@@ -249,7 +267,7 @@ class EditFunctionDialog(
 
     private fun viewToFunctionDetails(): FunctionUploadDetails = FunctionUploadDetails(
         name = view.name.text!!,
-        handler = view.handler.text,
+        handler = view.handlerPanel.handler.text,
         iamRole = view.iamRole.selected()!!,
         runtime = view.runtime.selected()!!,
         description = view.description.text,
@@ -287,8 +305,6 @@ class EditFunctionDialog(
         }
     }
 
-    override fun getNamespace(): String = "${mode.name}FunctionDialog"
-
     @TestOnly
     fun getViewForTestAssertions() = view
 }
@@ -300,9 +316,9 @@ class UploadToLambdaValidator {
             view.name
         )
         validateFunctionName(name)?.run { return@validateConfigurationSettings ValidationInfo(this, view.name) }
-        view.handler.text.nullize(true) ?: return ValidationInfo(
+        view.handlerPanel.handler.text.nullize(true) ?: return ValidationInfo(
             message("lambda.upload_validation.handler"),
-            view.handler
+            view.handlerPanel.handler
         )
         view.runtime.selected() ?: return ValidationInfo(message("lambda.upload_validation.runtime"), view.runtime)
         view.iamRole.selected() ?: return view.iamRole.validationInfo(message("lambda.upload_validation.iam_role"))
@@ -311,9 +327,9 @@ class UploadToLambdaValidator {
     }
 
     fun validateCodeSettings(project: Project, view: EditFunctionPanel): ValidationInfo? {
-        val handler = view.handler.text
+        val handler = view.handlerPanel.handler.text
         val runtime = view.runtime.selected()
-                ?: return ValidationInfo(message("lambda.upload_validation.runtime"), view.runtime)
+            ?: return ValidationInfo(message("lambda.upload_validation.runtime"), view.runtime)
 
         runtime.runtimeGroup?.let { LambdaBuilder.getInstance(it) } ?: return ValidationInfo(
             message("lambda.upload_validation.unsupported_runtime", runtime),
@@ -322,7 +338,7 @@ class UploadToLambdaValidator {
 
         findPsiElementsForHandler(project, runtime, handler).firstOrNull() ?: return ValidationInfo(
             message("lambda.upload_validation.handler_not_found"),
-            view.handler
+            view.handlerPanel.handler
         )
 
         view.sourceBucket.selected() ?: return view.sourceBucket.validationInfo(message("lambda.upload_validation.source_bucket"))
