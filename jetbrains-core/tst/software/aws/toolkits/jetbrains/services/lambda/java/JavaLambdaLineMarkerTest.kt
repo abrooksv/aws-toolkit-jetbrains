@@ -7,6 +7,7 @@ import com.intellij.psi.PsiIdentifier
 import com.intellij.testFramework.fixtures.CodeInsightTestFixture
 import com.intellij.testFramework.runInEdtAndWait
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -14,6 +15,7 @@ import software.amazon.awssdk.services.lambda.model.FunctionConfiguration
 import software.amazon.awssdk.services.lambda.model.Runtime
 import software.amazon.awssdk.services.lambda.model.TracingMode
 import software.aws.toolkits.jetbrains.core.MockResourceCache
+import software.aws.toolkits.jetbrains.core.credentials.MockProjectAccountSettingsManager
 import software.aws.toolkits.jetbrains.services.lambda.resources.LambdaResources
 import software.aws.toolkits.jetbrains.services.lambda.upload.LambdaLineMarker
 import software.aws.toolkits.jetbrains.settings.LambdaSettings
@@ -63,6 +65,11 @@ class JavaLambdaLineMarkerTest {
             }
             """
         )
+    }
+
+    @After
+    fun tearDown() {
+        MockProjectAccountSettingsManager.getInstance(projectRule.project).reset()
     }
 
     @Test
@@ -480,6 +487,31 @@ Resources:
 
         findAndAssertMarks(fixture) { marks ->
             assertLineMarkerIs(marks, "ConcreteHandler")
+        }
+    }
+
+    @Test
+    fun noCredentialsLeadsToNoMarkerIfNoOtherCriteriaPasses() {
+        LambdaSettings.getInstance(projectRule.project).showAllHandlerGutterIcons = false
+        MockProjectAccountSettingsManager.getInstance(projectRule.project).changeCredentialProvider(null)
+
+        val fixture = projectRule.fixture
+
+        fixture.openClass(
+            """
+             package com.example;
+
+             public class UsefulUtils {
+
+                 public String upperCase(String input) {
+                     return input.toUpperCase();
+                 }
+             }
+             """
+        )
+
+        findAndAssertMarks(fixture) { marks ->
+            assertThat(marks).isEmpty()
         }
     }
 

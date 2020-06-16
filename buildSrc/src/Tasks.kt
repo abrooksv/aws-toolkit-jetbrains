@@ -149,7 +149,7 @@ open class CreateRelease : ChangeLogTask() {
     var releaseDate: String = DateTimeFormatter.ISO_DATE.format(LocalDate.now())
 
     @Input
-    var releaseVersion: String = project.version as String
+    var releaseVersion: String = (project.version as String).substringBeforeLast('-')
 
     @OutputFile
     fun releaseEntry(): File = File(changesDirectory, "$releaseVersion.json")
@@ -185,7 +185,7 @@ open class GenerateChangeLog : ChangeLogTask() {
 
     @OutputFile
     @Optional
-    var githubChangeLogFile: File? = File(project.relativePath("CHANGELOG.md"))
+    var githubChangeLogFile: File? = File(project.projectDir, "CHANGELOG.md")
         get() = if (generateGithub) field else null
 
     @TaskAction

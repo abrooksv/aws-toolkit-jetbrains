@@ -1,95 +1,56 @@
-// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 package software.aws.toolkits.jetbrains.services.s3.objectActions
 
 import com.intellij.icons.AllIcons
-import com.intellij.openapi.actionSystem.AnActionEvent
-import com.intellij.openapi.actionSystem.LangDataKeys
-import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.InputValidator
 import com.intellij.openapi.ui.Messages
-import com.intellij.openapi.vfs.VirtualFile
-import software.amazon.awssdk.services.s3.S3Client
-import software.amazon.awssdk.services.s3.model.CopyObjectRequest
-import software.amazon.awssdk.services.s3.model.DeleteObjectRequest
-import software.aws.toolkits.jetbrains.components.telemetry.ActionButtonWrapper
-import software.aws.toolkits.jetbrains.services.s3.S3VirtualBucket
-import software.aws.toolkits.jetbrains.services.s3.S3VirtualDirectory
-import software.aws.toolkits.jetbrains.services.s3.bucketEditor.S3KeyNode
-import software.aws.toolkits.jetbrains.services.s3.bucketEditor.S3TreeTable
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
+import software.aws.toolkits.jetbrains.services.s3.editor.S3TreeNode
+import software.aws.toolkits.jetbrains.services.s3.editor.S3TreeObjectNode
+import software.aws.toolkits.jetbrains.services.s3.editor.S3TreeTable
 import software.aws.toolkits.jetbrains.utils.notifyError
 import software.aws.toolkits.resources.message
-import javax.swing.tree.DefaultMutableTreeNode
+import software.aws.toolkits.telemetry.Result
+import software.aws.toolkits.telemetry.S3Telemetry
 
-class RenameObjectAction(private var treeTable: S3TreeTable, val bucket: S3VirtualBucket) :
-    ActionButtonWrapper(message("s3.rename.object.action"), null, AllIcons.Actions.Refresh) {
+class RenameObjectAction(
+    private val project: Project,
+    treeTable: S3TreeTable
+) : SingleS3ObjectAction(treeTable, message("s3.rename.object.action"), AllIcons.Actions.RefactoringBulb) {
 
-    @Suppress("unused")
-    override fun doActionPerformed(e: AnActionEvent) {
-        val project = e.getRequiredData(LangDataKeys.PROJECT)
-        val client: S3Client = bucket.s3Bucket.client
-        val row = treeTable.selectedRow
-        val path = treeTable.tree.getPathForRow(row)
-        val node = (path.lastPathComponent as DefaultMutableTreeNode).userObject as S3KeyNode
-        val file = node.virtualFile
+    override fun enabled(node: S3TreeNode): Boolean = node is S3TreeObjectNode
 
-        val response = Messages.showInputDialog(project,
-            message("s3.rename.object.title", file.name),
+    override fun performAction(node: S3TreeNode) {
+
+        val newName = Messages.showInputDialog(
+            project,
+            message("s3.rename.object.title", node.name),
             message("s3.rename.object.action"),
             null,
-            file.name,
+            node.name,
             object : InputValidator {
                 override fun checkInput(inputString: String?): Boolean = true
 
                 override fun canClose(inputString: String?): Boolean = checkInput(inputString)
             }
         )
-        if (response != null) {
-            ApplicationManager.getApplication().executeOnPooledThread {
+        if (newName == null) {
+            S3Telemetry.renameObject(project, Result.Cancelled)
+        } else {
+            GlobalScope.launch {
                 try {
-                    renameObjectAction(response, file, client)
+                    treeTable.bucket.renameObject(node.key, "${node.parent?.key}$newName")
+                    treeTable.invalidateLevel(node)
                     treeTable.refresh()
+                    S3Telemetry.renameObject(project, Result.Succeeded)
                 } catch (e: Exception) {
                     e.notifyError(message("s3.rename.object.failed"))
+                    S3Telemetry.renameObject(project, Result.Failed)
                 }
             }
         }
-    }
-
-    override fun isEnabled(): Boolean = !(treeTable.isEmpty || (treeTable.selectedRow < 0) ||
-            (treeTable.getValueAt(treeTable.selectedRow, 1) == "") || (treeTable.selectedRows.size > 1))
-
-    fun renameObjectAction(response: String, file: VirtualFile, client: S3Client) {
-        val bucketName = bucket.getVirtualBucketName()
-        var copySource: String
-        var copyDestination: String
-        if (file.parent is S3VirtualDirectory) {
-            copySource = "${file.parent.name}/${file.name}"
-            copyDestination = "${file.parent.name}/$response"
-        } else {
-            copySource = file.name
-            copyDestination = response
-        }
-        var copyObjectRequest: CopyObjectRequest =
-            when (file.name.contains("/")) {
-                true -> CopyObjectRequest.builder()
-                    .copySource("$bucketName/$copySource")
-                    .bucket(bucketName)
-                    .key("$copyDestination")
-                    .build()
-
-                false -> CopyObjectRequest.builder()
-                    .copySource("$bucketName/$copySource")
-                    .bucket(bucketName)
-                    .key(copyDestination)
-                    .build()
-            }
-        client.copyObject(copyObjectRequest)
-
-        val deleteObjectRequest = DeleteObjectRequest.builder()
-            .bucket(bucketName)
-            .key(copySource)
-            .build()
-        client.deleteObject(deleteObjectRequest)
     }
 }

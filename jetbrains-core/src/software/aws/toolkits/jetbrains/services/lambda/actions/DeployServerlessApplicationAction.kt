@@ -3,11 +3,13 @@
 
 package software.aws.toolkits.jetbrains.services.lambda.actions
 
+import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.LangDataKeys
 import com.intellij.openapi.actionSystem.PlatformDataKeys
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.runInEdt
+import com.intellij.openapi.application.runReadAction
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.module.ModuleUtil
 import com.intellij.openapi.project.Project
@@ -15,76 +17,94 @@ import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.vfs.VirtualFile
 import icons.AwsIcons
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient
-import software.aws.toolkits.jetbrains.components.telemetry.AnActionWrapper
 import software.aws.toolkits.jetbrains.core.awsClient
 import software.aws.toolkits.jetbrains.core.credentials.ProjectAccountSettingsManager
-import software.aws.toolkits.jetbrains.core.stack.StackWindowManager
+import software.aws.toolkits.jetbrains.core.executables.ExecutableInstance
+import software.aws.toolkits.jetbrains.core.executables.ExecutableManager
+import software.aws.toolkits.jetbrains.core.executables.getExecutable
 import software.aws.toolkits.jetbrains.services.cloudformation.describeStack
 import software.aws.toolkits.jetbrains.services.cloudformation.executeChangeSetAndWait
+import software.aws.toolkits.jetbrains.services.cloudformation.stack.StackWindowManager
+import software.aws.toolkits.jetbrains.services.cloudformation.validateSamTemplateHasResources
 import software.aws.toolkits.jetbrains.services.cloudformation.validateSamTemplateLambdaRuntimes
+import software.aws.toolkits.jetbrains.services.lambda.LambdaHandlerResolver
 import software.aws.toolkits.jetbrains.services.lambda.deploy.DeployServerlessApplicationDialog
 import software.aws.toolkits.jetbrains.services.lambda.deploy.SamDeployDialog
-import software.aws.toolkits.jetbrains.services.lambda.sam.SamCommon
+import software.aws.toolkits.jetbrains.services.lambda.sam.SamExecutable
 import software.aws.toolkits.jetbrains.settings.DeploySettings
 import software.aws.toolkits.jetbrains.settings.relativeSamPath
+import software.aws.toolkits.jetbrains.utils.Operation
+import software.aws.toolkits.jetbrains.utils.TaggingResourceType
 import software.aws.toolkits.jetbrains.utils.notifyError
 import software.aws.toolkits.jetbrains.utils.notifyInfo
 import software.aws.toolkits.jetbrains.utils.notifyNoActiveCredentialsError
 import software.aws.toolkits.jetbrains.utils.notifySamCliNotValidError
-import software.aws.toolkits.jetbrains.utils.Operation
-import software.aws.toolkits.jetbrains.utils.TaggingResourceType
 import software.aws.toolkits.jetbrains.utils.warnResourceOperationAgainstCodePipeline
 import software.aws.toolkits.resources.message
+import software.aws.toolkits.telemetry.Result
+import software.aws.toolkits.telemetry.SamTelemetry
 
-class DeployServerlessApplicationAction : AnActionWrapper(
+class DeployServerlessApplicationAction : AnAction(
     message("serverless.application.deploy"),
     null,
     AwsIcons.Resources.SERVERLESS_APP
 ) {
     private val templateYamlRegex = Regex("template\\.y[a]?ml", RegexOption.IGNORE_CASE)
 
-    override fun doActionPerformed(e: AnActionEvent) {
+    override fun actionPerformed(e: AnActionEvent) {
         val project = e.getRequiredData(PlatformDataKeys.PROJECT)
 
-        if (!ProjectAccountSettingsManager.getInstance(project).hasActiveCredentials()) {
+        if (!ProjectAccountSettingsManager.getInstance(project).isValidConnectionSettings()) {
             notifyNoActiveCredentialsError(project = project)
             return
         }
 
-        SamCommon.validate()?.let {
-            notifySamCliNotValidError(project = project, content = it)
-            return
-        }
+        ExecutableManager.getInstance().getExecutable<SamExecutable>().thenAccept { samExecutable ->
+            when (samExecutable) {
+                is ExecutableInstance.InvalidExecutable, is ExecutableInstance.UnresolvedExecutable -> {
+                    notifySamCliNotValidError(
+                        project = project,
+                        content = (samExecutable as ExecutableInstance.BadExecutable).validationError
+                    )
+                    return@thenAccept
+                }
+            }
 
-        val templateFile = getSamTemplateFile(e)
-        if (templateFile == null) {
-            Exception(message("serverless.application.deploy.toast.template_file_failure"))
+            val templateFile = getSamTemplateFile(e)
+            if (templateFile == null) {
+                Exception(message("serverless.application.deploy.toast.template_file_failure"))
                     .notifyError(message("aws.notification.title"), project)
-            return
-        }
+                return@thenAccept
+            }
 
-        validateTemplateFile(project, templateFile)?.let {
-            notifyError(content = it, project = project)
-            return
-        }
+            validateTemplateFile(project, templateFile)?.let {
+                notifyError(content = it, project = project)
+                return@thenAccept
+            }
 
-        // Force save before we deploy
-        FileDocumentManager.getInstance().saveAllDocuments()
+            runInEdt {
+                // Force save before we deploy
+                FileDocumentManager.getInstance().saveAllDocuments()
 
-        val stackDialog = DeployServerlessApplicationDialog(project, templateFile)
-        stackDialog.show()
-        if (!stackDialog.isOK) return
+                val stackDialog = DeployServerlessApplicationDialog(project, templateFile)
+                stackDialog.show()
+                if (!stackDialog.isOK) {
+                    SamTelemetry.deploy(project, Result.Cancelled)
+                    return@runInEdt
+                }
 
-        saveSettings(project, templateFile, stackDialog)
+                saveSettings(project, templateFile, stackDialog)
 
-        val stackName = stackDialog.stackName
-        val stackId = stackDialog.stackId
+                val stackName = stackDialog.stackName
+                val stackId = stackDialog.stackId
 
-        if (stackId == null) {
-            continueDeployment(project, stackName, templateFile, stackDialog)
-        } else {
-            warnResourceOperationAgainstCodePipeline(project, stackName, stackId, TaggingResourceType.CLOUDFORMATION_STACK, Operation.DEPLOY) {
-                continueDeployment(project, stackName, templateFile, stackDialog)
+                if (stackId == null) {
+                    continueDeployment(project, stackName, templateFile, stackDialog)
+                } else {
+                    warnResourceOperationAgainstCodePipeline(project, stackName, stackId, TaggingResourceType.CLOUDFORMATION_STACK, Operation.DEPLOY) {
+                        continueDeployment(project, stackName, templateFile, stackDialog)
+                    }
+                }
             }
         }
     }
@@ -97,7 +117,8 @@ class DeployServerlessApplicationAction : AnActionWrapper(
             stackDialog.parameters,
             stackDialog.bucket,
             stackDialog.autoExecute,
-            stackDialog.useContainer
+            stackDialog.useContainer,
+            stackDialog.capabilities
         )
 
         deployDialog.show()
@@ -120,8 +141,10 @@ class DeployServerlessApplicationAction : AnActionWrapper(
                     message("cloudformation.execute_change_set.success", stackName),
                     project
                 )
+                SamTelemetry.deploy(project, Result.Succeeded)
             } catch (e: Exception) {
                 e.notifyError(message("cloudformation.execute_change_set.failed", stackName), project)
+                SamTelemetry.deploy(project, Result.Failed)
             }
         }
     }
@@ -129,18 +152,23 @@ class DeployServerlessApplicationAction : AnActionWrapper(
     override fun update(e: AnActionEvent) {
         super.update(e)
 
-        e.presentation.isVisible = getSamTemplateFile(e) != null
+        // If there are no supported runtime groups, it will never succeed so don't show it
+        e.presentation.isVisible = if (LambdaHandlerResolver.supportedRuntimeGroups.isEmpty()) {
+            false
+        } else {
+            getSamTemplateFile(e) != null
+        }
     }
 
     /**
      * Determines the relevant Sam Template, returns null if one can't be found.
      */
-    private fun getSamTemplateFile(e: AnActionEvent): VirtualFile? {
-        val virtualFiles = e.getData(PlatformDataKeys.VIRTUAL_FILE_ARRAY) ?: return null
-        val virtualFile = virtualFiles.singleOrNull() ?: return null
+    private fun getSamTemplateFile(e: AnActionEvent): VirtualFile? = runReadAction {
+        val virtualFiles = e.getData(PlatformDataKeys.VIRTUAL_FILE_ARRAY) ?: return@runReadAction null
+        val virtualFile = virtualFiles.singleOrNull() ?: return@runReadAction null
 
         if (templateYamlRegex.matches(virtualFile.name)) {
-            return virtualFile
+            return@runReadAction virtualFile
         }
 
         // If the module node was selected, see if there is a template file in the top level folder
@@ -152,11 +180,11 @@ class DeployServerlessApplicationAction : AnActionWrapper(
             }
 
             if (childTemplateFiles.size == 1) {
-                return childTemplateFiles.single()
+                return@runReadAction childTemplateFiles.single()
             }
         }
 
-        return null
+        return@runReadAction null
     }
 
     private fun saveSettings(project: Project, templateFile: VirtualFile, stackDialog: DeployServerlessApplicationDialog) {
@@ -167,10 +195,16 @@ class DeployServerlessApplicationAction : AnActionWrapper(
                     setSamBucketName(samPath, stackDialog.bucket)
                     setSamAutoExecute(samPath, stackDialog.autoExecute)
                     setSamUseContainer(samPath, stackDialog.useContainer)
+                    setEnabledCapabilities(samPath, stackDialog.capabilities)
                 }
             }
         }
     }
 
-    private fun validateTemplateFile(project: Project, templateFile: VirtualFile): String? = project.validateSamTemplateLambdaRuntimes(templateFile)
+    private fun validateTemplateFile(project: Project, templateFile: VirtualFile): String? =
+        try {
+            project.validateSamTemplateHasResources(templateFile) ?: project.validateSamTemplateLambdaRuntimes(templateFile)
+        } catch (e: Exception) {
+            message("serverless.application.deploy.error.bad_parse", templateFile.path, e)
+        }
 }

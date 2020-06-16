@@ -9,7 +9,9 @@ import com.intellij.openapi.application.runInEdt
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.module.ModuleUtil
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.ValidationInfo
+import com.intellij.util.ExceptionUtil
 import com.intellij.util.text.nullize
 import com.intellij.util.ui.UIUtil
 import org.jetbrains.annotations.TestOnly
@@ -17,8 +19,6 @@ import software.amazon.awssdk.services.iam.IamClient
 import software.amazon.awssdk.services.lambda.LambdaClient
 import software.amazon.awssdk.services.lambda.model.Runtime
 import software.amazon.awssdk.services.s3.S3Client
-import software.aws.toolkits.core.utils.listBucketsByRegion
-import software.aws.toolkits.jetbrains.components.telemetry.LoggingDialogWrapper
 import software.aws.toolkits.jetbrains.core.AwsClientManager
 import software.aws.toolkits.jetbrains.core.awsClient
 import software.aws.toolkits.jetbrains.core.credentials.ProjectAccountSettingsManager
@@ -26,25 +26,28 @@ import software.aws.toolkits.jetbrains.core.help.HelpIds
 import software.aws.toolkits.jetbrains.core.region.AwsRegionProvider
 import software.aws.toolkits.jetbrains.services.iam.CreateIamRoleDialog
 import software.aws.toolkits.jetbrains.services.iam.IamRole
-import software.aws.toolkits.jetbrains.services.iam.listRolesFilter
 import software.aws.toolkits.jetbrains.services.lambda.Lambda.findPsiElementsForHandler
 import software.aws.toolkits.jetbrains.services.lambda.LambdaBuilder
 import software.aws.toolkits.jetbrains.services.lambda.LambdaFunction
 import software.aws.toolkits.jetbrains.services.lambda.LambdaLimits.DEFAULT_MEMORY_SIZE
 import software.aws.toolkits.jetbrains.services.lambda.LambdaLimits.DEFAULT_TIMEOUT
 import software.aws.toolkits.jetbrains.services.lambda.runtimeGroup
+import software.aws.toolkits.jetbrains.services.lambda.sam.SamOptions
 import software.aws.toolkits.jetbrains.services.lambda.upload.EditFunctionMode.NEW
 import software.aws.toolkits.jetbrains.services.lambda.upload.EditFunctionMode.UPDATE_CODE
 import software.aws.toolkits.jetbrains.services.lambda.upload.EditFunctionMode.UPDATE_CONFIGURATION
 import software.aws.toolkits.jetbrains.services.lambda.validOrNull
 import software.aws.toolkits.jetbrains.services.s3.CreateS3BucketDialog
+import software.aws.toolkits.jetbrains.utils.lambdaTracingConfigIsAvailable
 import software.aws.toolkits.jetbrains.utils.notifyError
 import software.aws.toolkits.jetbrains.utils.notifyInfo
 import software.aws.toolkits.jetbrains.utils.ui.blankAsNull
 import software.aws.toolkits.jetbrains.utils.ui.selected
+import software.aws.toolkits.jetbrains.utils.ui.validationInfo
 import software.aws.toolkits.resources.message
+import software.aws.toolkits.telemetry.LambdaTelemetry
+import software.aws.toolkits.telemetry.Result
 import java.awt.event.ActionEvent
-import java.util.function.Function
 import javax.swing.Action
 import javax.swing.JComponent
 
@@ -66,22 +69,22 @@ class EditFunctionDialog(
     private val memorySize: Int = DEFAULT_MEMORY_SIZE,
     private val xrayEnabled: Boolean = false,
     private val role: IamRole? = null
-) : LoggingDialogWrapper(project) {
+) : DialogWrapper(project) {
 
     constructor(project: Project, lambdaFunction: LambdaFunction, mode: EditFunctionMode = UPDATE_CONFIGURATION) :
-            this(
-                project = project,
-                mode = mode,
-                name = lambdaFunction.name,
-                description = lambdaFunction.description ?: "",
-                runtime = lambdaFunction.runtime,
-                handlerName = lambdaFunction.handler,
-                envVariables = lambdaFunction.envVariables ?: emptyMap(),
-                timeout = lambdaFunction.timeout,
-                memorySize = lambdaFunction.memorySize,
-                xrayEnabled = lambdaFunction.xrayEnabled,
-                role = lambdaFunction.role
-            )
+        this(
+            project = project,
+            mode = mode,
+            name = lambdaFunction.name,
+            description = lambdaFunction.description ?: "",
+            runtime = lambdaFunction.runtime,
+            handlerName = lambdaFunction.handler,
+            envVariables = lambdaFunction.envVariables ?: emptyMap(),
+            timeout = lambdaFunction.timeout,
+            memorySize = lambdaFunction.memorySize,
+            xrayEnabled = lambdaFunction.xrayEnabled,
+            role = lambdaFunction.role
+        )
 
     private val view = EditFunctionPanel(project)
     private val validator = UploadToLambdaValidator()
@@ -104,7 +107,7 @@ class EditFunctionDialog(
 
         view.name.text = name
 
-        view.handler.text = handlerName
+        view.handlerPanel.handler.text = handlerName
         view.timeoutSlider.value = timeout
         view.memorySlider.value = memorySize
         view.description.text = description
@@ -113,15 +116,8 @@ class EditFunctionDialog(
         if (mode == UPDATE_CONFIGURATION) {
             view.name.isEnabled = false
             view.deploySettings.isVisible = false
+            view.buildSettings.isVisible = false
         } else {
-            view.sourceBucket.populateValues {
-                val activeRegionId = ProjectAccountSettingsManager.getInstance(project).activeRegion.id
-                s3Client.listBucketsByRegion(activeRegionId)
-                    .mapNotNull { it.name() }
-                    .sortedWith(String.CASE_INSENSITIVE_ORDER)
-                    .toList()
-            }
-
             view.createBucket.addActionListener {
                 val bucketDialog = CreateS3BucketDialog(
                     project = project,
@@ -130,13 +126,18 @@ class EditFunctionDialog(
                 )
 
                 if (bucketDialog.showAndGet()) {
-                    bucketDialog.bucketName().let { newBucket -> view.sourceBucket.addAndSelectValue { newBucket } }
+                    bucketDialog.bucketName().let {
+                        view.sourceBucket.reload(forceFetch = true)
+                        view.sourceBucket.selectedItem = it
+                    }
                 }
             }
         }
 
         if (mode == UPDATE_CODE) {
-            UIUtil.uiChildren(view.configurationSettings).filter { it !== view.handler && it !== view.handlerLabel }.forEach { it.isVisible = false }
+            UIUtil.uiChildren(view.configurationSettings)
+                .filter { it !== view.handlerPanel && it !== view.handlerLabel }
+                .forEach { it.isVisible = false }
         }
 
         view.setRuntimes(Runtime.knownValues())
@@ -146,14 +147,9 @@ class EditFunctionDialog(
 
         val regionProvider = AwsRegionProvider.getInstance()
         val settings = ProjectAccountSettingsManager.getInstance(project)
-        view.setXrayControlVisibility(mode != UPDATE_CODE && regionProvider.isServiceSupported(settings.activeRegion, "xray"))
+        view.setXrayControlVisibility(mode != UPDATE_CODE && lambdaTracingConfigIsAvailable(settings.activeRegion))
 
-        view.iamRole.populateValues(default = role) {
-            iamClient.listRolesFilter { it.assumeRolePolicyDocument().contains(LAMBDA_PRINCIPAL) }
-                .map { IamRole(it.arn()) }
-                .sortedWith(Comparator.comparing<IamRole, String>(Function { it.toString() }, String.CASE_INSENSITIVE_ORDER))
-                .toList()
-        }
+        view.iamRole.selectedItem = role
 
         view.createRole.addActionListener {
             val iamRoleDialog = CreateIamRoleDialog(
@@ -164,7 +160,10 @@ class EditFunctionDialog(
                 defaultPolicyDocument = DEFAULT_POLICY
             )
             if (iamRoleDialog.showAndGet()) {
-                iamRoleDialog.iamRole?.let { newRole -> view.iamRole.addAndSelectValue { newRole } }
+                iamRoleDialog.iamRole?.let { newRole ->
+                    view.iamRole.reload(forceFetch = true)
+                    view.iamRole.selectedItem = newRole
+                }
             }
         }
     }
@@ -172,7 +171,7 @@ class EditFunctionDialog(
     private fun configurationChanged(): Boolean = mode != NEW && !(name == view.name.text &&
         description == view.description.text &&
         runtime == view.runtime.selected() &&
-        handlerName == view.handler.text &&
+        handlerName == view.handlerPanel.handler.text &&
         envVariables.entries == view.envVars.envVars.entries &&
         timeout == view.timeoutSlider.value &&
         memorySize == view.memorySlider.value &&
@@ -191,6 +190,11 @@ class EditFunctionDialog(
 
     override fun getOKAction(): Action = action
 
+    override fun doCancelAction() {
+        LambdaTelemetry.editFunction(project, result = Result.Cancelled)
+        super.doCancelAction()
+    }
+
     override fun doOKAction() {
         // Do nothing, close logic is handled separately
     }
@@ -203,35 +207,42 @@ class EditFunctionDialog(
         }
 
     private fun upsertLambdaCode() {
-        if (okAction.isEnabled) {
-            val functionDetails = viewToFunctionDetails()
-            val element = findPsiElementsForHandler(project, functionDetails.runtime, functionDetails.handler).first()
-            val psiFile = element.containingFile
-            val module = ModuleUtil.findModuleForFile(psiFile) ?: throw IllegalStateException("Failed to locate module for $psiFile")
+        if (!okAction.isEnabled) {
+            return
+        }
+        val functionDetails = viewToFunctionDetails()
+        val element = findPsiElementsForHandler(project, functionDetails.runtime, functionDetails.handler).first()
+        val psiFile = element.containingFile
+        val module = ModuleUtil.findModuleForFile(psiFile) ?: throw IllegalStateException("Failed to locate module for $psiFile")
 
-            val s3Bucket = view.sourceBucket.selectedItem as String
+        val s3Bucket = view.sourceBucket.selectedItem as String
 
-            val lambdaBuilder = psiFile.language.runtimeGroup?.let { LambdaBuilder.getInstance(it) } ?: return
-            val lambdaCreator = LambdaCreatorFactory.create(AwsClientManager.getInstance(project), lambdaBuilder)
+        val lambdaBuilder = psiFile.language.runtimeGroup?.let { LambdaBuilder.getInstance(it) } ?: return
+        val lambdaCreator = LambdaCreatorFactory.create(AwsClientManager.getInstance(project), lambdaBuilder)
 
-            FileDocumentManager.getInstance().saveAllDocuments()
+        FileDocumentManager.getInstance().saveAllDocuments()
 
-            val (future, message) = if (mode == UPDATE_CODE) {
-                lambdaCreator.updateLambda(module, element, functionDetails, s3Bucket, configurationChanged()) to
-                    message("lambda.function.code_updated.notification", functionDetails.name)
-            } else {
-                lambdaCreator.createLambda(module, element, functionDetails, s3Bucket) to
-                    message("lambda.function.created.notification", functionDetails.name)
-            }
+        val (future, message) = if (mode == UPDATE_CODE) {
+            lambdaCreator.updateLambda(module, element, functionDetails, s3Bucket, configurationChanged()) to
+                message("lambda.function.code_updated.notification", functionDetails.name)
+        } else {
+            lambdaCreator.createLambda(module, element, functionDetails, s3Bucket) to
+                message("lambda.function.created.notification", functionDetails.name)
+        }
 
-            future.whenComplete { _, error ->
-                when (error) {
-                    null -> notifyInfo(title = NOTIFICATION_TITLE, content = message, project = project)
-                    is Exception -> error.notifyError(title = NOTIFICATION_TITLE)
+        future.whenComplete { _, error ->
+            when (error) {
+                null -> {
+                    notifyInfo(title = NOTIFICATION_TITLE, content = message, project = project)
+                    LambdaTelemetry.editFunction(project, update = false, result = Result.Succeeded)
+                }
+                is Exception -> {
+                    error.notifyError(title = NOTIFICATION_TITLE)
+                    LambdaTelemetry.editFunction(project, update = false, result = Result.Failed)
                 }
             }
-            close(OK_EXIT_CODE)
         }
+        close(OK_EXIT_CODE)
     }
 
     private fun updateConfiguration() {
@@ -242,15 +253,17 @@ class EditFunctionDialog(
 
             ApplicationManager.getApplication().executeOnPooledThread {
                 LambdaFunctionCreator(lambdaClient).update(functionDetails)
-                    .thenAccept { runInEdt(ModalityState.any()) { close(OK_EXIT_CODE) } }
-                    .whenComplete { _, error ->
-                        when (error) {
-                            null -> notifyInfo(
-                                title = NOTIFICATION_TITLE,
-                                content = message("lambda.function.configuration_updated.notification", functionDetails.name)
-                            )
-                            is Exception -> error.notifyError(title = NOTIFICATION_TITLE)
-                        }
+                    .thenAccept {
+                        notifyInfo(
+                            title = NOTIFICATION_TITLE,
+                            content = message("lambda.function.configuration_updated.notification", functionDetails.name)
+                        )
+                        runInEdt(ModalityState.any()) { close(OK_EXIT_CODE) }
+                        LambdaTelemetry.editFunction(project, update = true, result = Result.Succeeded)
+                    }.exceptionally { error ->
+                        setErrorText(ExceptionUtil.getNonEmptyMessage(error, error.toString()))
+                        LambdaTelemetry.editFunction(project, update = true, result = Result.Failed)
+                        null
                     }
             }
         }
@@ -258,14 +271,17 @@ class EditFunctionDialog(
 
     private fun viewToFunctionDetails(): FunctionUploadDetails = FunctionUploadDetails(
         name = view.name.text!!,
-        handler = view.handler.text,
+        handler = view.handlerPanel.handler.text,
         iamRole = view.iamRole.selected()!!,
         runtime = view.runtime.selected()!!,
         description = view.description.text,
         envVars = view.envVars.envVars,
         timeout = view.timeoutSlider.value,
         memorySize = view.memorySlider.value,
-        xrayEnabled = view.xrayEnabled.isSelected
+        xrayEnabled = view.xrayEnabled.isSelected,
+        samOptions = SamOptions(
+            buildInContainer = view.buildInContainer.isSelected
+        )
     )
 
     private inner class CreateNewLambdaOkAction : OkAction() {
@@ -296,8 +312,6 @@ class EditFunctionDialog(
         }
     }
 
-    override fun getNamespace(): String = "${mode.name}FunctionDialog"
-
     @TestOnly
     fun getViewForTestAssertions() = view
 }
@@ -309,23 +323,20 @@ class UploadToLambdaValidator {
             view.name
         )
         validateFunctionName(name)?.run { return@validateConfigurationSettings ValidationInfo(this, view.name) }
-        view.handler.text.nullize(true) ?: return ValidationInfo(
+        view.handlerPanel.handler.text.nullize(true) ?: return ValidationInfo(
             message("lambda.upload_validation.handler"),
-            view.handler
+            view.handlerPanel.handler
         )
         view.runtime.selected() ?: return ValidationInfo(message("lambda.upload_validation.runtime"), view.runtime)
-        view.iamRole.selected() ?: return view.iamRole.toValidationInfo(
-            loading = message("lambda.upload_validation.iam_role.loading"),
-            notSelected = message("lambda.upload_validation.iam_role")
-        )
+        view.iamRole.selected() ?: return view.iamRole.validationInfo(message("lambda.upload_validation.iam_role"))
 
         return view.timeoutSlider.validate() ?: view.memorySlider.validate()
     }
 
     fun validateCodeSettings(project: Project, view: EditFunctionPanel): ValidationInfo? {
-        val handler = view.handler.text
+        val handler = view.handlerPanel.handler.text
         val runtime = view.runtime.selected()
-                ?: return ValidationInfo(message("lambda.upload_validation.runtime"), view.runtime)
+            ?: return ValidationInfo(message("lambda.upload_validation.runtime"), view.runtime)
 
         runtime.runtimeGroup?.let { LambdaBuilder.getInstance(it) } ?: return ValidationInfo(
             message("lambda.upload_validation.unsupported_runtime", runtime),
@@ -334,14 +345,10 @@ class UploadToLambdaValidator {
 
         findPsiElementsForHandler(project, runtime, handler).firstOrNull() ?: return ValidationInfo(
             message("lambda.upload_validation.handler_not_found"),
-            view.handler
+            view.handlerPanel.handler
         )
 
-        view.sourceBucket.selected() ?: return view.sourceBucket.toValidationInfo(
-            loading = message("lambda.upload_validation.source_bucket.loading"),
-            notSelected = message("lambda.upload_validation.source_bucket")
-        )
-
+        view.sourceBucket.selected() ?: return view.sourceBucket.validationInfo(message("lambda.upload_validation.source_bucket"))
         return null
     }
 

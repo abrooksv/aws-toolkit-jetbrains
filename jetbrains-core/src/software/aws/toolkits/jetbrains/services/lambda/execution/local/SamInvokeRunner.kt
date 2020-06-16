@@ -34,6 +34,7 @@ import software.aws.toolkits.jetbrains.services.lambda.sam.SamTemplateUtils
 import software.aws.toolkits.jetbrains.services.lambda.validOrNull
 import software.aws.toolkits.jetbrains.services.sts.StsResources
 import software.aws.toolkits.jetbrains.services.telemetry.TelemetryService
+import software.aws.toolkits.telemetry.Result
 import java.io.File
 
 class SamInvokeRunner : AsyncProgramRunner<RunnerSettings>() {
@@ -63,7 +64,10 @@ class SamInvokeRunner : AsyncProgramRunner<RunnerSettings>() {
                 profile.runtime()
             }
 
-            return SamDebugSupport.supportedRuntimeGroups.contains(runtimeValue?.runtimeGroup)
+            val runtimeGroup = runtimeValue?.runtimeGroup ?: return false
+
+            return SamDebugSupport.supportedRuntimeGroups.contains(runtimeGroup) &&
+                SamDebugSupport.getInstance(runtimeGroup)?.isSupported(runtimeValue) ?: false
         }
 
         return false
@@ -72,7 +76,7 @@ class SamInvokeRunner : AsyncProgramRunner<RunnerSettings>() {
     override fun execute(environment: ExecutionEnvironment, state: RunProfileState): Promise<RunContentDescriptor?> {
         FileDocumentManager.getInstance().saveAllDocuments()
 
-        val buildingPromise = AsyncPromise<RunContentDescriptor>()
+        val buildingPromise = AsyncPromise<RunContentDescriptor?>()
         val samState = state as SamRunningState
         val lambdaSettings = samState.settings
         val module = getModule(samState.settings.handlerElement.containingFile)
@@ -98,9 +102,15 @@ class SamInvokeRunner : AsyncProgramRunner<RunnerSettings>() {
 
         LambdaBuilderUtils.buildAndReport(module, runtimeGroup, buildRequest)
             .thenAccept {
+                samState.runner.checkDockerInstalled()
                 runInEdt {
                     samState.builtLambda = it
-                    buildingPromise.setResult(samState.runner.run(environment, samState))
+                    samState.runner.run(environment, samState)
+                        .onSuccess {
+                            buildingPromise.setResult(it)
+                        }.onError {
+                            buildingPromise.setError(it)
+                        }
                 }
             }.exceptionally {
                 LOG.warn(it) { "Failed to create Lambda package" }
@@ -111,30 +121,29 @@ class SamInvokeRunner : AsyncProgramRunner<RunnerSettings>() {
                     .getResource(StsResources.ACCOUNT, lambdaSettings.region, lambdaSettings.credentials)
                     .whenComplete { account, _ ->
                         TelemetryService.getInstance().record(
-                            "SamInvoke",
                             TelemetryService.MetricEventMetadata(
                                 awsAccount = account ?: METADATA_INVALID,
                                 awsRegion = lambdaSettings.region.id
                             )
                         ) {
-                            val type = if (environment.isDebug()) "Debug" else "Run"
-                            datum(type) {
+                            datum("lambda_invokeLocal") {
                                 count()
                                 // exception can be null but is not annotated as nullable
-                                metadata("hasException", exception != null)
+                                metadata("debug", environment.isDebug())
+                                metadata("result", if (exception == null) Result.Succeeded.value else Result.Failed.value)
                                 metadata("runtime", lambdaSettings.runtime.name)
                                 metadata("samVersion", SamCommon.getVersionString())
                                 metadata("templateBased", buildRequest is BuildLambdaFromTemplate)
                             }
+                        }
                     }
             }
-        }
 
         return buildingPromise
     }
 
     private fun getModule(psiFile: PsiFile): Module = ModuleUtil.findModuleForFile(psiFile)
-            ?: throw java.lang.IllegalStateException("Failed to locate module for $psiFile")
+        ?: throw java.lang.IllegalStateException("Failed to locate module for $psiFile")
 
     private fun ExecutionEnvironment.isDebug(): Boolean = (executor.id == DefaultDebugExecutor.EXECUTOR_ID)
 

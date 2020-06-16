@@ -8,7 +8,6 @@ import com.intellij.testFramework.runInEdtAndWait
 import com.nhaarman.mockitokotlin2.argumentCaptor
 import com.nhaarman.mockitokotlin2.doReturn
 import com.nhaarman.mockitokotlin2.doThrow
-import com.nhaarman.mockitokotlin2.mock
 import com.nhaarman.mockitokotlin2.stub
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
@@ -18,21 +17,20 @@ import software.amazon.awssdk.services.s3.S3Client
 import software.amazon.awssdk.services.s3.model.BucketAlreadyExistsException
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest
 import software.amazon.awssdk.services.s3.model.CreateBucketResponse
-import software.aws.toolkits.jetbrains.utils.DelegateSdkConsumers
+import software.aws.toolkits.core.utils.delegateMock
 
 class CreateBucketActionDialogTest {
     @Rule
     @JvmField
     val projectRule = ProjectRule()
 
-    private val s3Mock = mock<S3Client>(defaultAnswer = DelegateSdkConsumers())
+    private val s3Mock = delegateMock<S3Client>()
 
     @Test
     fun validateBucketName_emptyBucketName() {
         runInEdtAndWait {
             val dialog = CreateS3BucketDialog(project = projectRule.project, s3Client = s3Mock)
-            val view = dialog.getViewForTesting()
-            view.bucketName.text = "  "
+            dialog.view.bucketName.text = "  "
 
             val validationInfo = dialog.validateBucketName()
             assertThat(validationInfo).isNotNull()
@@ -52,8 +50,7 @@ class CreateBucketActionDialogTest {
                 project = projectRule.project,
                 s3Client = s3Mock
             )
-            val bucketPanel = dialog.getViewForTesting()
-            bucketPanel.bucketName.text = TEST_BUCKET_NAME
+            dialog.view.bucketName.text = TEST_BUCKET_NAME
 
             dialog.createBucket()
 
@@ -75,8 +72,7 @@ class CreateBucketActionDialogTest {
 
         runInEdtAndWait {
             val dialog = CreateS3BucketDialog(project = projectRule.project, s3Client = s3Mock)
-            val view = dialog.getViewForTesting()
-            view.bucketName.text = TEST_BUCKET_NAME
+            dialog.view.bucketName.text = TEST_BUCKET_NAME
 
             assertThatThrownBy { dialog.createBucket() }.hasMessage(TEST_ERROR_MESSAGE)
         }

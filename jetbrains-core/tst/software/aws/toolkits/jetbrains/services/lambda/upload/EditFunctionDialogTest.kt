@@ -3,8 +3,12 @@
 
 package software.aws.toolkits.jetbrains.services.lambda.upload
 
-import com.intellij.testFramework.ProjectRule
+import com.intellij.openapi.application.runWriteAction
+import com.intellij.openapi.projectRoots.ProjectJdkTable
+import com.intellij.openapi.roots.ProjectRootManager
+import com.intellij.testFramework.IdeaTestUtil
 import com.intellij.testFramework.runInEdtAndGet
+import com.intellij.testFramework.runInEdtAndWait
 import com.nhaarman.mockitokotlin2.any
 import com.nhaarman.mockitokotlin2.mock
 import com.nhaarman.mockitokotlin2.whenever
@@ -27,12 +31,13 @@ import software.aws.toolkits.core.region.AwsRegion
 import software.aws.toolkits.jetbrains.core.MockClientManagerRule
 import software.aws.toolkits.jetbrains.core.credentials.MockProjectAccountSettingsManager
 import software.aws.toolkits.jetbrains.core.credentials.ProjectAccountSettingsManager
+import software.aws.toolkits.jetbrains.utils.rules.JavaCodeInsightTestFixtureRule
 
 class EditFunctionDialogTest {
 
     @JvmField
     @Rule
-    val projectRule = ProjectRule()
+    val projectRule = JavaCodeInsightTestFixtureRule()
 
     @JvmField
     @Rule
@@ -47,11 +52,19 @@ class EditFunctionDialogTest {
     fun setup() {
         s3Client = mockClientManager.create()
         iamClient = mockClientManager.create()
-        mockSettingsManager.activeRegion = AwsRegion("us-west-1", "US West 1")
+        mockSettingsManager.changeRegion(AwsRegion("us-west-1", "US West 1", "aws"))
+
+        val sdk = IdeaTestUtil.getMockJdk18()
+        runInEdtAndWait {
+            runWriteAction {
+                ProjectJdkTable.getInstance().addJdk(sdk, projectRule.fixture.projectDisposable)
+                ProjectRootManager.getInstance(projectRule.project).projectSdk = sdk
+            }
+        }
     }
 
     @Test
-    fun newShowsBothConfigurationAndDeploymentSettings() {
+    fun newShowsConfigurationDeploymentAndBuildSettings() {
         mockBuckets()
         mockRoles()
 
@@ -61,6 +74,7 @@ class EditFunctionDialogTest {
 
         assertThat(dialog.getViewForTestAssertions().configurationSettings.isVisible).isTrue()
         assertThat(dialog.getViewForTestAssertions().deploySettings.isVisible).isTrue()
+        assertThat(dialog.getViewForTestAssertions().buildSettings.isVisible).isTrue()
     }
 
     @Test
@@ -74,10 +88,11 @@ class EditFunctionDialogTest {
 
         assertThat(dialog.getViewForTestAssertions().configurationSettings.isVisible).isTrue()
         assertThat(dialog.getViewForTestAssertions().deploySettings.isVisible).isFalse()
+        assertThat(dialog.getViewForTestAssertions().buildSettings.isVisible).isFalse()
     }
 
     @Test
-    fun updateCodeShowsOnlyDeploymentSettingsAndHandler() {
+    fun updateCodeShowsOnlyDeploymentSettingsHandlerAndBuild() {
         mockBuckets()
         mockRoles()
 
@@ -86,7 +101,10 @@ class EditFunctionDialogTest {
         }
 
         assertThat(dialog.getViewForTestAssertions().deploySettings.isVisible).isTrue()
-        assertThat(dialog.getViewForTestAssertions().handler.isVisible).isTrue()
+        assertThat(dialog.getViewForTestAssertions().buildSettings.isVisible).isTrue()
+        assertThat(dialog.getViewForTestAssertions().handlerPanel.handler.isVisible).isTrue()
+
+        assertThat(dialog.getViewForTestAssertions().buildInContainer.isVisible).isTrue()
 
         assertThat(dialog.getViewForTestAssertions().name.isVisible).isFalse()
         assertThat(dialog.getViewForTestAssertions().description.isVisible).isFalse()

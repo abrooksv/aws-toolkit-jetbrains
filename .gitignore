@@ -1,10 +1,12 @@
 .gradle
 out/
 target/
-/.idea/
+.idea
+!.run/
 build/
 *.iml
 .DS_Store
 Build/
 venv/
 guitest.log
+stale_outputs_checked

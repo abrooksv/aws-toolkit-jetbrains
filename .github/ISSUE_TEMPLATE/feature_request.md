@@ -1,7 +1,7 @@
 ---
 name: Feature request
-about: Suggest an idea for the Toolkit
-
+about: Suggest an idea for the AWS Toolkit
+labels: feature-request 
 ---
 
 **Is your feature request related to a problem? Please describe.**

@@ -22,9 +22,13 @@ import software.aws.toolkits.core.utils.getLogger
 import software.aws.toolkits.core.utils.warn
 import software.aws.toolkits.jetbrains.core.credentials.ProjectAccountSettingsManager
 import software.aws.toolkits.jetbrains.core.credentials.toEnvironmentVariables
+import software.aws.toolkits.jetbrains.core.executables.ExecutableInstance
+import software.aws.toolkits.jetbrains.core.executables.ExecutableManager
+import software.aws.toolkits.jetbrains.core.executables.getExecutable
 import software.aws.toolkits.jetbrains.services.lambda.sam.SamCommon
-import software.aws.toolkits.jetbrains.services.telemetry.TelemetryService
+import software.aws.toolkits.jetbrains.services.lambda.sam.SamExecutable
 import software.aws.toolkits.resources.message
+import software.aws.toolkits.telemetry.SamTelemetry
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -33,21 +37,22 @@ import java.util.concurrent.CompletionStage
 import javax.swing.Action
 import javax.swing.JComponent
 
-open class SamDeployDialog(
+class SamDeployDialog(
     private val project: Project,
     private val stackName: String,
     private val template: VirtualFile,
     private val parameters: Map<String, String>,
     private val s3Bucket: String,
     private val autoExecute: Boolean,
-    private val useContainer: Boolean
+    private val useContainer: Boolean,
+    private val capabilities: List<CreateCapabilities>
 ) : DialogWrapper(project) {
     private val progressIndicator = ProgressIndicatorBase()
     private val view = SamDeployView(project, progressIndicator)
     private var currentStep = 0
     private val credentialsProvider = ProjectAccountSettingsManager.getInstance(project).activeCredentialProvider
     private val region = ProjectAccountSettingsManager.getInstance(project).activeRegion
-    private val changeSetRegex = "(arn:aws:cloudformation:.*changeSet/[^\\s]*)".toRegex()
+    private val changeSetRegex = "(arn:aws.*?:cloudformation:.*changeSet/[^\\s]*)".toRegex()
     val deployFuture: CompletableFuture<String>
     lateinit var changeSetName: String
         private set
@@ -89,59 +94,74 @@ open class SamDeployDialog(
 
         Files.createDirectories(buildDir)
 
-        val command = createBaseCommand()
-            .withParameters("build")
-            .withParameters("--template")
-            .withParameters(template.path)
-            .withParameters("--build-dir")
-            .withParameters(buildDir.toString())
-            .apply {
-                if (useContainer) {
-                    withParameters("--use-container")
+        return createBaseCommand().thenApply {
+            it
+                .withParameters("build")
+                .withParameters("--template")
+                .withParameters(template.path)
+                .withParameters("--build-dir")
+                .withParameters(buildDir.toString())
+                .apply {
+                    if (useContainer) {
+                        withParameters("--use-container")
+                    }
                 }
-            }
 
-        val builtTemplate = buildDir.resolve("template.yaml")
-        return runCommand(message("serverless.application.deploy.step_name.build"), command) { builtTemplate }
+            it
+        }.thenCompose {
+            val builtTemplate = buildDir.resolve("template.yaml")
+            runCommand(message("serverless.application.deploy.step_name.build"), it) { builtTemplate }
+        }
     }
 
     private fun runSamPackage(builtTemplateFile: Path): CompletionStage<Path> {
         advanceStep()
         val packagedTemplatePath = builtTemplateFile.parent.resolve("packaged-${builtTemplateFile.fileName}")
-        val command = createBaseCommand()
-            .withParameters("package")
-            .withParameters("--template-file")
-            .withParameters(builtTemplateFile.toString())
-            .withParameters("--output-template-file")
-            .withParameters(packagedTemplatePath.toString())
-            .withParameters("--s3-bucket")
-            .withParameters(s3Bucket)
+        return createBaseCommand().thenApply {
+            it
+                .withParameters("package")
+                .withParameters("--template-file")
+                .withParameters(builtTemplateFile.toString())
+                .withParameters("--output-template-file")
+                .withParameters(packagedTemplatePath.toString())
+                .withParameters("--s3-bucket")
+                .withParameters(s3Bucket)
 
-        return runCommand(message("serverless.application.deploy.step_name.package"), command) { packagedTemplatePath }
+            it
+        }.thenCompose {
+            runCommand(message("serverless.application.deploy.step_name.package"), it) { packagedTemplatePath }
+        }
     }
 
     private fun runSamDeploy(packagedTemplateFile: Path): CompletionStage<String> {
         advanceStep()
-        val command = createBaseCommand()
-            .withParameters("deploy")
-            .withParameters("--template-file")
-            .withParameters(packagedTemplateFile.toString())
-            .withParameters("--stack-name")
-            .withParameters(stackName)
-            .withParameters("--capabilities")
-            .withParameters("CAPABILITY_IAM", "CAPABILITY_NAMED_IAM")
-            .withParameters("--no-execute-changeset")
+        return createBaseCommand().thenApply { it ->
+            it.withParameters("deploy")
+                .withParameters("--template-file")
+                .withParameters(packagedTemplateFile.toString())
+                .withParameters("--stack-name")
+                .withParameters(stackName)
 
-        if (parameters.isNotEmpty()) {
-            command.withParameters("--parameter-overrides")
-            parameters.forEach { key, value ->
-                command.withParameters("$key=$value")
+            if (capabilities.isNotEmpty()) {
+                it.withParameters("--capabilities")
+                    .withParameters(capabilities.map { it.capability })
             }
-        }
 
-        return runCommand(message("serverless.application.deploy.step_name.create_change_set"), command) { output ->
-            changeSetRegex.find(output.stdout)?.value
+            it.withParameters("--no-execute-changeset")
+
+            if (parameters.isNotEmpty()) {
+                it.withParameters("--parameter-overrides")
+                parameters.forEach { (key, value) ->
+                    it.withParameters("$key=$value")
+                }
+            }
+
+            it
+        }.thenCompose { command ->
+            runCommand(message("serverless.application.deploy.step_name.create_change_set"), command) { output ->
+                changeSetRegex.find(output.stdout)?.value
                     ?: throw RuntimeException(message("serverless.application.deploy.change_set_not_found"))
+            }
         }
     }
 
@@ -157,6 +177,12 @@ open class SamDeployDialog(
                 doOKAction()
             }
         }
+
+        SamTelemetry.deploy(
+            project = project,
+            success = true,
+            version = SamCommon.getVersionString()
+        )
     }
 
     private fun handleError(error: Throwable): String {
@@ -169,19 +195,32 @@ open class SamDeployDialog(
         }
         setErrorText(message)
 
+        SamTelemetry.deploy(
+            project = project,
+            success = false,
+            version = SamCommon.getVersionString()
+        )
+
         progressIndicator.cancel()
         cancelAction.isEnabled = true
         throw error
     }
 
-    private fun createBaseCommand(): GeneralCommandLine {
+    private fun createBaseCommand(): CompletionStage<GeneralCommandLine> {
         val envVars = mutableMapOf<String, String>()
         envVars.putAll(region.toEnvironmentVariables())
         envVars.putAll(credentialsProvider.resolveCredentials().toEnvironmentVariables())
 
-        return SamCommon.getSamCommandLine()
-            .withWorkDirectory(template.parent.path)
-            .withEnvironment(envVars)
+        return ExecutableManager.getInstance().getExecutable<SamExecutable>().thenApply {
+            val samExecutable = when (it) {
+                is ExecutableInstance.Executable -> it
+                else -> throw RuntimeException((it as? ExecutableInstance.BadExecutable)?.validationError)
+            }
+            return@thenApply samExecutable
+                .getCommandLine()
+                .withWorkDirectory(template.parent.path)
+                .withEnvironment(envVars)
+        }
     }
 
     private fun advanceStep() {
@@ -213,19 +252,10 @@ open class SamDeployDialog(
             }
         }
 
-        return future.whenComplete { _, exception ->
-            TelemetryService.getInstance().record(project, "SamDeploy") {
-                datum(title) {
-                    count()
-                    // exception can be null but is not annotated as nullable
-                    metadata("hasException", exception != null)
-                    metadata("samVersion", SamCommon.getVersionString())
-                }
-            }
-        }
+        return future
     }
 
-    protected open fun createProcess(command: GeneralCommandLine): OSProcessHandler =
+    private fun createProcess(command: GeneralCommandLine): OSProcessHandler =
         ProcessHandlerFactory.getInstance().createColoredProcessHandler(command)
 
     private companion object {
