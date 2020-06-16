@@ -10,15 +10,11 @@ import static software.aws.toolkits.resources.Localization.message;
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.ComboBox;
-import com.intellij.openapi.ui.ComponentWithBrowseButton;
 import com.intellij.openapi.ui.TextComponentAccessor;
 import com.intellij.openapi.ui.TextFieldWithBrowseButton;
-import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.EditorTextField;
 import com.intellij.ui.IdeBorderFactory;
 import com.intellij.ui.SortedComboBoxModel;
-import com.intellij.util.textCompletion.TextCompletionProvider;
-import com.intellij.util.textCompletion.TextFieldWithCompletion;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 import java.io.File;
@@ -29,69 +25,91 @@ import javax.swing.DefaultComboBoxModel;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JPanel;
-import javax.swing.JTextField;
-import org.jetbrains.annotations.NotNull;
+import javax.swing.SwingUtilities;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.yaml.YAMLFileType;
 import software.amazon.awssdk.services.lambda.model.Runtime;
 import software.aws.toolkits.core.utils.ExceptionUtils;
 import software.aws.toolkits.jetbrains.services.cloudformation.Function;
+import software.aws.toolkits.jetbrains.services.lambda.LambdaWidgets;
 import software.aws.toolkits.jetbrains.services.lambda.RuntimeGroupUtil;
 import software.aws.toolkits.jetbrains.services.lambda.execution.LambdaInputPanel;
 import software.aws.toolkits.jetbrains.services.lambda.sam.SamTemplateUtils;
-import software.aws.toolkits.jetbrains.ui.CredentialProviderSelector;
 import software.aws.toolkits.jetbrains.ui.EnvironmentVariablesTextField;
-import software.aws.toolkits.jetbrains.ui.RegionSelector;
+import software.aws.toolkits.jetbrains.ui.HandlerPanel;
+import software.aws.toolkits.jetbrains.ui.ProjectFileBrowseListener;
+import software.aws.toolkits.jetbrains.ui.SliderPanel;
 
 public final class LocalLambdaRunSettingsEditorPanel {
     public JPanel panel;
-    public EditorTextField handler;
+    public HandlerPanel handlerPanel;
     public EnvironmentVariablesTextField environmentVariables;
     private SortedComboBoxModel<Runtime> runtimeModel;
     public JComboBox<Runtime> runtime;
-    public RegionSelector regionSelector;
-    public CredentialProviderSelector credentialSelector;
     public LambdaInputPanel lambdaInput;
     public JCheckBox useTemplate;
     public JComboBox<Function> function;
     private DefaultComboBoxModel<Function> functionModels;
     public TextFieldWithBrowseButton templateFile;
     public JPanel lambdaInputPanel;
+    public SliderPanel timeoutSlider;
+    public SliderPanel memorySlider;
+    public JCheckBox invalidator;
+
+    private Runtime lastSelectedRuntime = null;
 
     private final Project project;
-    private final TextCompletionProvider handlerCompletionProvider;
 
-    public LocalLambdaRunSettingsEditorPanel(Project project, TextCompletionProvider handlerCompletionProvider) {
+    public LocalLambdaRunSettingsEditorPanel(Project project) {
         this.project = project;
-        this.handlerCompletionProvider = handlerCompletionProvider;
 
-        lambdaInputPanel.setBorder(IdeBorderFactory.createTitledBorder(message("lambda.input.label"),
-                                                                       false,
-                                                                       JBUI.emptyInsets())
-        );
+        lambdaInputPanel.setBorder(IdeBorderFactory.createTitledBorder(message("lambda.input.label"), false, JBUI.emptyInsets()));
         useTemplate.addActionListener(e -> updateComponents());
         addQuickSelect(templateFile.getTextField(), useTemplate, this::updateComponents);
-        templateFile.addActionListener(new TemplateFileBrowseListener());
+        templateFile.addActionListener(new ProjectFileBrowseListener<>(
+            project,
+            templateFile,
+            FileChooserDescriptorFactory.createSingleFileDescriptor(YAMLFileType.YML),
+            TextComponentAccessor.TEXT_FIELD_WHOLE_TEXT
+        ));
+
+        runtime.addActionListener(e -> {
+            int index = runtime.getSelectedIndex();
+            if (index < 0) {
+                lastSelectedRuntime = null;
+                return;
+            }
+            Runtime selectedRuntime = runtime.getItemAt(index);
+            if (selectedRuntime == lastSelectedRuntime) return;
+            lastSelectedRuntime = selectedRuntime;
+            handlerPanel.setRuntime(selectedRuntime);
+        });
+
         updateComponents();
     }
 
     private void createUIComponents() {
-        handler = new TextFieldWithCompletion(project, handlerCompletionProvider, "", true, true, true, true);
+        handlerPanel = new HandlerPanel(project);
         lambdaInput = new LambdaInputPanel(project);
-
         functionModels = new DefaultComboBoxModel<>();
         function = new ComboBox<>(functionModels);
         function.addActionListener(e -> updateComponents());
 
         runtimeModel = new SortedComboBoxModel<>(Comparator.comparing(Runtime::toString, Comparator.naturalOrder()));
         runtime = new ComboBox<>(runtimeModel);
-        environmentVariables = new EnvironmentVariablesTextField(project);
+        environmentVariables = new EnvironmentVariablesTextField();
+        timeoutSlider = LambdaWidgets.lambdaTimeout();
+        memorySlider = LambdaWidgets.lambdaMemory();
     }
 
     private void updateComponents() {
-        handler.setEnabled(!useTemplate.isSelected());
+        EditorTextField handler = handlerPanel.getHandler();
+
+        handlerPanel.setEnabled(!useTemplate.isSelected());
         runtime.setEnabled(!useTemplate.isSelected());
         templateFile.setEnabled(useTemplate.isSelected());
+        timeoutSlider.setEnabled(!useTemplate.isSelected());
+        memorySlider.setEnabled(!useTemplate.isSelected());
 
         if (useTemplate.isSelected()) {
             handler.setBackground(UIUtil.getComboBoxDisabledBackground());
@@ -100,6 +118,14 @@ public final class LocalLambdaRunSettingsEditorPanel {
             if (functionModels.getSelectedItem() instanceof Function) {
                 Function selected = (Function) functionModels.getSelectedItem();
                 handler.setText(selected.handler());
+                Integer memorySize = selected.memorySize();
+                Integer timeout = selected.timeout();
+                if (memorySize != null) {
+                    memorySlider.setValue(memorySize);
+                }
+                    if (timeout != null) {
+                        timeoutSlider.setValue(timeout);
+                }
 
                 Runtime runtime = Runtime.fromValue(ExceptionUtils.tryOrNull(selected::runtime));
                 runtimeModel.setSelectedItem(RuntimeGroupUtil.getValidOrNull(runtime));
@@ -149,21 +175,7 @@ public final class LocalLambdaRunSettingsEditorPanel {
         runtimeModel.setAll(runtimes);
     }
 
-    private class TemplateFileBrowseListener extends ComponentWithBrowseButton.BrowseFolderActionListener<JTextField> {
-        TemplateFileBrowseListener() {
-            super(null,
-                  null,
-                  templateFile,
-                  project,
-                  FileChooserDescriptorFactory.createSingleFileDescriptor(YAMLFileType.YML),
-                  TextComponentAccessor.TEXT_FIELD_SELECTED_TEXT);
-        }
-
-        @Override
-        protected void onFileChosen(@NotNull VirtualFile chosenFile) {
-            templateFile.setText(chosenFile.getPath());
-            List<Function> functions = SamTemplateUtils.findFunctionsFromTemplate(project, chosenFile);
-            updateFunctionModel(functions, true);
-        }
+    public void invalidateConfiguration() {
+        SwingUtilities.invokeLater(() -> invalidator.setSelected(!invalidator.isSelected()));
     }
 }

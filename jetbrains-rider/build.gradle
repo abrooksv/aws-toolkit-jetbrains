@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 buildscript {
-    ext.rd_version = "0.192.36"
+    ext.rd_version = rdGenVersion()
+
+    println("Using rd-gen: $rd_version")
 
     repositories {
         maven { url 'https://www.myget.org/F/rd-snapshots/maven/' }
@@ -16,12 +18,13 @@ buildscript {
 
 ext.resharperPluginPath = new File(projectDir, "ReSharper.AWS")
 
-def buildConfiguration = ext.properties["BuildConfiguration"] ?: "Debug"
-def pluginFiles = [
-        "AWS.Localization/bin/$buildConfiguration/net461/AWS.Localization",
-        "AWS.Daemon/bin/$buildConfiguration/net461/AWS.Daemon",
-        "AWS.Psi/bin/$buildConfiguration/net461/AWS.Psi"
-]
+try {
+    InetAddress.getByName("repo.labs.intellij.net")
+    ext.localEnv = false
+} catch (UnknownHostException ignored) {
+    println("Not running in JetBrains' network")
+    ext.localEnv = true
+}
 
 apply plugin: 'org.jetbrains.intellij'
 apply plugin: 'com.jetbrains.rdgen'
@@ -31,12 +34,12 @@ apply from: 'backend.gradle'
 
 dependencies {
     compile project(":jetbrains-core")
-    testCompile project(path: ":jetbrains-core", configuration: 'testArtifacts')
+    testImplementation project(path: ":jetbrains-core", configuration: 'testArtifacts')
 }
 
 intellij {
     def parentIntellijTask = project(':jetbrains-core').intellij
-    version ideVersion("RD")
+    version ideSdkVersion("RD")
     pluginName parentIntellijTask.pluginName
     updateSinceUntilBuild parentIntellijTask.updateSinceUntilBuild
 
@@ -59,33 +62,25 @@ intellij {
 tasks.withType(prepareSandbox.class).all {
     dependsOn buildReSharperPlugin
 
-    def files = pluginFiles.collect { "$resharperPluginPath/src/${it}.dll" } +
-                pluginFiles.collect { "$resharperPluginPath/src/${it}.pdb" }
-
-    files.each {
-        from(it, { into("${intellij.pluginName}/dotnet") })
-    }
-
-    doLast {
-        files.each {
-            def file = new File(it)
-            if (!file.isFile()) throw new GradleException("File $file does not exist")
-            logger.warn("$name: ${file.name} -> ${destinationDir}/${intellij.pluginName}/dotnet")
-        }
-    }
+    from(buildReSharperPlugin.outputs, {
+        into("${intellij.pluginName}/dotnet")
+    })
 }
 
 compileKotlin.dependsOn(generateModel)
 
 test {
+    systemProperty("log.dir", "${project.intellij.sandboxDirectory}-test/logs")
     useTestNG()
-    ignoreFailures = true
+    environment("LOCAL_ENV_RUN", localEnv)
+    maxHeapSize("1024m")
 }
 
-runIde {
-    systemProperty("aws.toolkits.enableTelemetry", false)
+tasks.integrationTest {
+    useTestNG()
+    environment("LOCAL_ENV_RUN", localEnv)
 }
 
 jar {
-    archiveBaseName = 'aws-intellij-toolkit-rider'
+    archiveBaseName.set('aws-intellij-toolkit-rider')
 }

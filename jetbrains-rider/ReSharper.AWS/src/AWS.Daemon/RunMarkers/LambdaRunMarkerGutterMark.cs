@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using AWS.Daemon.Lambda;
 using AWS.Localization;
 using JetBrains.Annotations;
 using JetBrains.Application.UI.Controls.BulbMenu.Anchors;
@@ -14,9 +15,8 @@ using JetBrains.UI.RichText;
 using JetBrains.UI.ThemedIcons;
 using JetBrains.Util;
 using JetBrains.Util.Logging;
-using ReSharper.AWS.Lambda;
 
-namespace ReSharper.AWS.RunMarkers
+namespace AWS.Daemon.RunMarkers
 {
     public abstract class LambdaRunMarkerGutterMark : IconGutterMark
     {
@@ -47,7 +47,7 @@ namespace ReSharper.AWS.RunMarkers
         private IEnumerable<BulbMenuItem> GetRunMethodItems(ISolution solution,
             [NotNull] RunMarkerHighlighting runMarker)
         {
-            var lambdaHost = solution.GetComponent<LambdaHost>();
+            var lambdaHost = solution.GetComponent<LambdaDaemonHost>();
             var javaPropertiesLoader = solution.GetComponent<JavaPropertiesLoader>();
 
             var methodName = runMarker.Method.ShortName;

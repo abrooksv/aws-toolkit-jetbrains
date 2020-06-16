@@ -24,7 +24,7 @@ import software.aws.toolkits.core.telemetry.DefaultMetricEvent.Companion.METADAT
 import software.aws.toolkits.core.utils.getLogger
 import software.aws.toolkits.core.utils.tryOrNull
 import software.aws.toolkits.core.utils.warn
-import software.aws.toolkits.jetbrains.core.AwsAccountCache
+import software.aws.toolkits.jetbrains.core.AwsResourceCache
 import software.aws.toolkits.jetbrains.services.lambda.BuildLambdaFromHandler
 import software.aws.toolkits.jetbrains.services.lambda.BuildLambdaFromTemplate
 import software.aws.toolkits.jetbrains.services.lambda.LambdaBuilderUtils
@@ -32,7 +32,9 @@ import software.aws.toolkits.jetbrains.services.lambda.runtimeGroup
 import software.aws.toolkits.jetbrains.services.lambda.sam.SamCommon
 import software.aws.toolkits.jetbrains.services.lambda.sam.SamTemplateUtils
 import software.aws.toolkits.jetbrains.services.lambda.validOrNull
+import software.aws.toolkits.jetbrains.services.sts.StsResources
 import software.aws.toolkits.jetbrains.services.telemetry.TelemetryService
+import software.aws.toolkits.telemetry.Result
 import java.io.File
 
 class SamInvokeRunner : AsyncProgramRunner<RunnerSettings>() {
@@ -65,7 +67,7 @@ class SamInvokeRunner : AsyncProgramRunner<RunnerSettings>() {
             val runtimeGroup = runtimeValue?.runtimeGroup ?: return false
 
             return SamDebugSupport.supportedRuntimeGroups.contains(runtimeGroup) &&
-                    SamDebugSupport.getInstance(runtimeGroup)?.isSupported() ?: false
+                SamDebugSupport.getInstance(runtimeGroup)?.isSupported(runtimeValue) ?: false
         }
 
         return false
@@ -74,7 +76,7 @@ class SamInvokeRunner : AsyncProgramRunner<RunnerSettings>() {
     override fun execute(environment: ExecutionEnvironment, state: RunProfileState): Promise<RunContentDescriptor?> {
         FileDocumentManager.getInstance().saveAllDocuments()
 
-        val buildingPromise = AsyncPromise<RunContentDescriptor>()
+        val buildingPromise = AsyncPromise<RunContentDescriptor?>()
         val samState = state as SamRunningState
         val lambdaSettings = samState.settings
         val module = getModule(samState.settings.handlerElement.containingFile)
@@ -91,6 +93,8 @@ class SamInvokeRunner : AsyncProgramRunner<RunnerSettings>() {
                 lambdaSettings.handlerElement,
                 lambdaSettings.handler,
                 lambdaSettings.runtime,
+                lambdaSettings.timeout,
+                lambdaSettings.memorySize,
                 lambdaSettings.environmentVariables,
                 lambdaSettings.samOptions
             )
@@ -98,6 +102,7 @@ class SamInvokeRunner : AsyncProgramRunner<RunnerSettings>() {
 
         LambdaBuilderUtils.buildAndReport(module, runtimeGroup, buildRequest)
             .thenAccept {
+                samState.runner.checkDockerInstalled()
                 runInEdt {
                     samState.builtLambda = it
                     samState.runner.run(environment, samState)
@@ -112,30 +117,33 @@ class SamInvokeRunner : AsyncProgramRunner<RunnerSettings>() {
                 buildingPromise.setError(it)
                 throw it
             }.whenComplete { _, exception ->
-                TelemetryService.getInstance().record(
-                    "SamInvoke",
-                    TelemetryService.MetricEventMetadata(
-                        awsAccount = AwsAccountCache.getInstance().awsAccount(lambdaSettings.credentials) ?: METADATA_INVALID,
-                        awsRegion = lambdaSettings.region.id
-                    )
-                ) {
-                    val type = if (environment.isDebug()) "Debug" else "Run"
-                    datum(type) {
-                        count()
-                        // exception can be null but is not annotated as nullable
-                        metadata("hasException", exception != null)
-                        metadata("runtime", lambdaSettings.runtime.name)
-                        metadata("samVersion", SamCommon.getVersionString())
-                        metadata("templateBased", buildRequest is BuildLambdaFromTemplate)
-                }
+                AwsResourceCache.getInstance(state.environment.project)
+                    .getResource(StsResources.ACCOUNT, lambdaSettings.region, lambdaSettings.credentials)
+                    .whenComplete { account, _ ->
+                        TelemetryService.getInstance().record(
+                            TelemetryService.MetricEventMetadata(
+                                awsAccount = account ?: METADATA_INVALID,
+                                awsRegion = lambdaSettings.region.id
+                            )
+                        ) {
+                            datum("lambda_invokeLocal") {
+                                count()
+                                // exception can be null but is not annotated as nullable
+                                metadata("debug", environment.isDebug())
+                                metadata("result", if (exception == null) Result.Succeeded.value else Result.Failed.value)
+                                metadata("runtime", lambdaSettings.runtime.name)
+                                metadata("samVersion", SamCommon.getVersionString())
+                                metadata("templateBased", buildRequest is BuildLambdaFromTemplate)
+                            }
+                        }
+                    }
             }
-        }
 
         return buildingPromise
     }
 
     private fun getModule(psiFile: PsiFile): Module = ModuleUtil.findModuleForFile(psiFile)
-            ?: throw java.lang.IllegalStateException("Failed to locate module for $psiFile")
+        ?: throw java.lang.IllegalStateException("Failed to locate module for $psiFile")
 
     private fun ExecutionEnvironment.isDebug(): Boolean = (executor.id == DefaultDebugExecutor.EXECUTOR_ID)
 

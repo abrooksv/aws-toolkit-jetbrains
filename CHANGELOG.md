@@ -1,3 +1,120 @@
+# _1.16_ (2020-05-27)
+- **(Breaking Change)** The toolkit now requires 2019.3 or newer
+- **(Feature)** Add support for GoLand, CLion, RubyMine, and PhpStorm
+
+# _1.15_ (2020-05-21)
+- **(Feature)** Add the ability to build in container when updating function code ([#1740](https://github.com/aws/aws-toolkit-jetbrains/issues/1740))
+- **(Feature)** Add refresh to S3 browser
+- **(Removal)** Dropped support for run/debug of deprecated Lambda runtimes
+
+# _1.14_ (2020-05-04)
+- **(Feature)** Add support for selecting regions in other partitions
+
+# _1.13_ (2020-04-16)
+- **(Feature)** On refresh, AWS explorer tree nodes will no longer be collapsed
+- **(Feature)** Add capabilities check boxes to serverless deploy (issue [#1394](https://github.com/aws/aws-toolkit-jetbrains/issues/1394))
+- **(Bug Fix)** Fix duplicate entries in SAM Init panel (issue [#1695](https://github.com/aws/aws-toolkit-jetbrains/issues/1695))
+
+# _1.12_ (2020-04-07)
+- **(Breaking Change)** Minimum SAM CLI version has been increased to 0.47.0
+- **(Feature)** Support for CloudWatch Logs. View, filter, and stream log streams as well as quickly view logs from Lambda or ECS Containers.
+- **(Feature)** Add support for creating and running Lambdas with dotnet core 3.1. Debug support will come in a future release
+- **(Feature)** Add mechanism for users to submit feedback from within the toolkit
+- **(Feature)** Support for the 2020.1 family of IDEs
+- **(Bug Fix)** Fix issue [#1011](https://github.com/aws/aws-toolkit-jetbrains/issues/1011), python test files will no longer be recognized as lambda handlers
+- **(Bug Fix)** Fix a situation where a valid SAM executable would not be recognized as valid
+- **(Bug Fix)** Fix several issues with updating the SAM cli while the IDE is open
+- **(Bug Fix)** Close the S3 bucket viewer when you delete the bucket
+- **(Bug Fix)** Correct the max file size that can be opened from the S3 browser to idea.max.content.load.filesize instead of a constant 5MB
+- **(Bug Fix)** Fix stack overflow when a profile has a `role_arn` but not a `source_profile`
+- **(Bug Fix)** Fix SpeedSearch not working in S3 Bucket viewer
+- **(Removal)** Removed the ability to create a new SAM project for dotnet core 2.0 since it is a deprecated runtime
+
+# _1.11_ (2020-02-25)
+- **(Breaking Change)** Remove NodeJS 8.10 from the new project wizard since the runtime is deprecated
+- **(Feature)** IDE trust manager is now used to connect to AWS allowing configuration of untrusted certificates through the UI
+- **(Bug Fix)** Fix being unable to use `--parameter-overrides` with SAM build
+- **(Bug Fix)** Fixed not being able to view EventService Schemas on Windows 10
+
+# _1.10_ (2020-01-07)
+- **(Breaking Change)** Minimum SAM CLI version has been increased to 0.38.0
+- **(Breaking Change)** Remove the Lambda nodes underneath of the CloudFromation stack in the explorer
+- **(Feature)** Add S3 node and S3 Browser:
+  - Browse files and folders in a tree view
+  - Drag and drop upload
+  - Double click to open files directly in the IDE
+- **(Feature)** Add support for NodeJS 12 SAM/Lambdas
+- **(Feature)** Add support for Java 11 SAM/Lambda
+- **(Feature)** Add support for Java 11 SAM/Lambdas
+- **(Bug Fix)** Profile name restrictions has been relaxed to allow `.`, `%`, `@`. amd `/`
+
+# _1.9_ (2019-12-02)
+- **(Feature)** Added support for Amazon EventBridge schema registry, making it easy to discover and write code for events in EventBridge.
+
+# _1.8-192_ (2019-11-25)
+- **(Breaking Change)** Now requires a minimum version of 2019.2 to run
+- **(Feature)** Enable Cloud Debugging of ECS Services (beta)
+- **(Feature)** Respect the default region in config file on first start of the IDE
+- **(Feature)** Allow credential_process commands (in aws/config) to produce up to 64KB, permitting longer session tokens
+- **(Feature)** Adding support for WebStorm
+- **(Feature)** Enabled pasting of key value pairs into the environment variable table of local AWS Lambda run configurations
+- **(Feature)** Adding support for Rider
+- **(Bug Fix)** Fix an IDE error showing up during "SAM local debug" caused by running "docker ps" on the wrong thread
+- **(Bug Fix)** Browsing for files in the Lambda run configuration is now rooted at the project directory
+- **(Bug Fix)** Add an error on empty CloudFormation template or template that lacks a "Resources" section
+- **(Bug Fix)** Rider: Fix unsupported Node runtime showing up in the "Create Serverless Applications" menu
+- **(Bug Fix)** Fix the IDE showing an error sometimes when the SAM template file is invalid
+- **(Bug Fix)** Resolve initialization errors on 2019.3 EAP
+- **(Bug Fix)** Fix getting SAM version timing out in some circumstances which caused SAM related commands to fail
+- **(Bug Fix)** Fix being able to run "SAM local run" configurations without Docker running
+- **(Bug Fix)** Fix IDE error caused by editor text field being requested at the wrong scope level
+- **(Bug Fix)** Rider: Fix the "Deploy Serverless" menu not appearing when right clicking on the project view
+
+# _1.7_ (2019-10-17)
+- **(Feature)** A notification is shown on startup indicating that JetBrains 2019.2 or greater will be required in an upcoming AWS Toolkit release
+- **(Feature)** Add --no-interactive to SAM init when running a version of SAM >= 0.30.0
+- **(Feature)** Bump minimum SAM CLI version from 0.14.1 to 0.16.0
+- **(Feature)** Adding support for JetBrains Platform version 2019.3.
+- **(Bug Fix)** Fix error thrown adding Lambda gutter icons and not having any active credentials
+- **(Bug Fix)** Fix validating a Lambda handler not under a ReadAction
+
+# _1.6_ (2019-09-23)
+- **(Feature)** Open Stack Status UI on CloudFormation stack deletion.
+- **(Feature)** Removed requirement of having to double-click to load more resources in AWS Explorer if there is more than one page returned
+- **(Feature)** Added a Copy Arn action to AWS Explorer
+- **(Feature)** Move AWS Connection details into a common Run Configuration tab for remote and local Lambda execution.
+- **(Feature)** Enable caching of describe calls to avoid repeated network calls for already known resources.
+- **(Feature)** Support timeout and memory size settings in run configuration
+- **(Feature)** Porting resource selector to use resource-cache so network won't be hit on each dialog load.
+- **(Feature)** Add support to link Gradle project.
+- **(Feature)** Additional SAM build and SAM local invocation args configurable from Run/Debug Configuration settings
+- **(Bug Fix)** Fix the bug that PyCharm pipenv doesn't create the project location folder
+- **(Bug Fix)** Fix the CloudFormation explorer node not showing Lambdas that belong to the stack
+- **(Bug Fix)** Log errors to idea.log when we fail to swtich the active AWS credential profile
+- **(Bug Fix)** Handle the "me-" region prefix Treat the "me-" region prefix as Middle East
+- **(Bug Fix)** Fixing issue where explorer does not load even with credentials/region selected.
+- **(Bug Fix)** Fixing random AssertionError exception caused by Guava cache.
+- **(Bug Fix)** Fix the bug that underscores in profile names are not shown in AWS settings panel
+- **(Bug Fix)** Fixed bug in Pycharm's New Project pane where VirtualEnv path is not changed as project path is changed after switching Runtime
+- **(Bug Fix)** Handle non-cloudformation yaml files gracefully
+- **(Bug Fix)** Fix thread issue in PyCharm new project wizard
+- **(Bug Fix)** Fix the bug that toolkit throws unhandled exception on startup when active credential is not configured
+
+# _1.5_ (2019-07-29)
+- **(Feature)** Support Globals configuration in SAM template for serverless functions.
+- **(Feature)** Enable searching for `requirements.txt` when determining if a python method is a handler to match SAM build
+- **(Feature)** Enable toolkit in 2019.2 EAP
+- **(Feature)** Support building only the requested function when sam cli version is newer than 0.16
+- **(Bug Fix)** Upgraded AWS Java SDK to pull in latest model changes ([#1099](https://github.com/aws/aws-toolkit-jetbrains/issues/1099))
+- **(Bug Fix)** Fix DynamoDB template for Python does not create correctly.
+- **(Bug Fix)** Fix DaemonCodeAnalyzer restart not happening in a read action ([#1012](https://github.com/aws/aws-toolkit-jetbrains/issues/1012))
+- **(Bug Fix)** Fix the bug when project is in different drive than the temp folder drive for Windows. [#950](https://github.com/aws/aws-toolkit-jetbrains/issues/950)
+- **(Bug Fix)** Fix invalid credentials file reporting an IDE error
+- **(Bug Fix)** Fix issue where modifying a cloned run config results in mutation of the original
+- **(Bug Fix)** Fix runtime exceptions on project startup and run configuration validation
+- **(Bug Fix)** Fix read/write action issues when invoking a Lambda using SAM ([#1081](https://github.com/aws/aws-toolkit-jetbrains/issues/1081))
+- **(Bug Fix)** Make sure all STS assume role calls are not on the UI thread ([#1024](https://github.com/aws/aws-toolkit-jetbrains/issues/1024))
+
 # _1.4_ (2019-06-10)
 - **(Feature)** Usability enhancements to the CloudFormation UI
   - color coding status similar to the AWS Console

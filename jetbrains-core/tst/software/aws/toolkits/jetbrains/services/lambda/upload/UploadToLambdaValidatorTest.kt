@@ -3,10 +3,15 @@
 
 package software.aws.toolkits.jetbrains.services.lambda.upload
 
+import com.intellij.openapi.application.runWriteAction
+import com.intellij.openapi.projectRoots.ProjectJdkTable
+import com.intellij.openapi.roots.ProjectRootManager
+import com.intellij.testFramework.runInEdtAndWait
 import com.intellij.testFramework.EdtRule
+import com.intellij.testFramework.IdeaTestUtil
 import com.intellij.testFramework.RuleChain
 import com.intellij.testFramework.RunsInEdt
-import com.intellij.testFramework.runInEdtAndGet
+import com.intellij.ui.MutableCollectionComboBoxModel
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.Before
 import org.junit.Rule
@@ -30,23 +35,30 @@ class UploadToLambdaValidatorTest {
 
     @Before
     fun wireMocksTogetherWithValidOptions() {
-        view = runInEdtAndGet {
-            EditFunctionPanel(projectRule.project)
+        val project = projectRule.project
+
+        val sdk = IdeaTestUtil.getMockJdk18()
+        runInEdtAndWait {
+            runWriteAction {
+                ProjectJdkTable.getInstance().addJdk(sdk, projectRule.fixture.projectDisposable)
+                ProjectRootManager.getInstance(project).projectSdk = sdk
+            }
+            view = EditFunctionPanel(project)
         }
 
         view.name.text = "name"
         view.description.text = "description"
-        view.handler.text = "com.example.LambdaHandler::handleRequest"
+        view.handlerPanel.handler.text = "com.example.LambdaHandler::handleRequest"
         val role = IamRole("DummyArn")
-        view.iamRole.model = DefaultComboBoxModel(arrayOf(role))
-        view.iamRole.selectedItem = role
+        view.iamRole.model = MutableCollectionComboBoxModel(listOf(role)).also { it.selectedItem = role }
+        view.iamRole.forceLoaded()
         view.runtime.model = DefaultComboBoxModel(Runtime.knownValues().toTypedArray())
         view.runtime.selectedItem = Runtime.JAVA8
         val bucket = "sourceBucket"
-        view.sourceBucket.model = DefaultComboBoxModel(arrayOf(bucket))
-        view.sourceBucket.selectedItem = bucket
-        view.timeout.text = "30"
-        view.memorySize.text = "512"
+        view.sourceBucket.model = MutableCollectionComboBoxModel(listOf(bucket)).also { it.selectedItem = bucket }
+        view.sourceBucket.forceLoaded()
+        view.timeoutSlider.value = 30
+        view.memorySlider.value = 512
 
         projectRule.fixture.openClass(
             """
@@ -84,7 +96,7 @@ class UploadToLambdaValidatorTest {
 
     @Test
     fun handlerCannotBeBlank() {
-        view.handler.text = ""
+        view.handlerPanel.handler.text = ""
         assertThat(sut.validateConfigurationSettings(view)?.message).contains("Handler must be specified")
     }
 
@@ -102,56 +114,56 @@ class UploadToLambdaValidatorTest {
 
     @Test
     fun timeoutMustBeSpecified() {
-        view.timeout.text = ""
-        assertThat(sut.validateConfigurationSettings(view)?.message).contains("Timeout must be between")
+        view.timeoutSlider.textField.text = ""
+        assertThat(sut.validateConfigurationSettings(view)?.message).contains("The specified value must be an integer and between")
     }
 
     @Test
     fun timeoutMustBeNumeric() {
-        view.timeout.text = "foo"
-        assertThat(sut.validateConfigurationSettings(view)?.message).contains("Timeout must be between")
+        view.timeoutSlider.textField.text = "foo"
+        assertThat(sut.validateConfigurationSettings(view)?.message).contains("The specified value must be an integer and between")
     }
 
     @Test
     fun timeoutMustBeWithinLowerBound() {
-        view.timeout.text = "0"
-        assertThat(sut.validateConfigurationSettings(view)?.message).contains("Timeout must be between")
+        view.timeoutSlider.textField.text = "0"
+        assertThat(sut.validateConfigurationSettings(view)?.message).contains("The specified value must be an integer and between")
     }
 
     @Test
     fun timeoutMustBeWithinUpperBound() {
-        view.timeout.text = Integer.MAX_VALUE.toString()
-        assertThat(sut.validateConfigurationSettings(view)?.message).contains("Timeout must be between")
+        view.timeoutSlider.textField.text = Integer.MAX_VALUE.toString()
+        assertThat(sut.validateConfigurationSettings(view)?.message).contains("The specified value must be an integer and between")
     }
 
     @Test
     fun memoryMustBeSpecified() {
-        view.memorySize.text = ""
-        assertThat(sut.validateConfigurationSettings(view)?.message).contains("Memory must be between")
+        view.memorySlider.textField.text = ""
+        assertThat(sut.validateConfigurationSettings(view)?.message).contains("The specified value must be an integer and between")
     }
 
     @Test
     fun memoryMustBeNumeric() {
-        view.memorySize.text = "foo"
-        assertThat(sut.validateConfigurationSettings(view)?.message).contains("Memory must be between")
+        view.memorySlider.textField.text = "foo"
+        assertThat(sut.validateConfigurationSettings(view)?.message).contains("The specified value must be an integer and between")
     }
 
     @Test
     fun memoryMustBeWithinLowerBound() {
-        view.memorySize.text = "0"
-        assertThat(sut.validateConfigurationSettings(view)?.message).contains("Memory must be between")
+        view.memorySlider.textField.text = "0"
+        assertThat(sut.validateConfigurationSettings(view)?.message).contains("The specified value must be an integer and between")
     }
 
     @Test
     fun memoryMustBeAnIncrementOf64() {
-        view.memorySize.text = "13"
-        assertThat(sut.validateConfigurationSettings(view)?.message).contains("Memory must be between")
+        view.memorySlider.textField.text = "13"
+        assertThat(sut.validateConfigurationSettings(view)?.message).contains("The specified value must be an integer and between")
     }
 
     @Test
     fun memoryMustBeWithinUpperBound() {
-        view.memorySize.text = Integer.MAX_VALUE.toString()
-        assertThat(sut.validateConfigurationSettings(view)?.message).contains("Memory must be between")
+        view.memorySlider.textField.text = Integer.MAX_VALUE.toString()
+        assertThat(sut.validateConfigurationSettings(view)?.message).contains("The specified value must be an integer and between")
     }
 
     @Test
@@ -162,7 +174,7 @@ class UploadToLambdaValidatorTest {
 
     @Test
     fun handlerMustBeInProjectToDeploy() {
-        view.handler.text = "Foo"
+        view.handlerPanel.handler.text = "Foo"
         assertThat(sut.validateCodeSettings(projectRule.project, view)?.message).contains("Must be able to locate the handler")
     }
 

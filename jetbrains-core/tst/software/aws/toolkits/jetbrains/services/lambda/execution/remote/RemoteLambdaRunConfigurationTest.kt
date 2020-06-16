@@ -6,13 +6,11 @@ package software.aws.toolkits.jetbrains.services.lambda.execution.remote
 import com.intellij.execution.ExecutorRegistry
 import com.intellij.execution.configurations.RuntimeConfigurationError
 import com.intellij.execution.executors.DefaultRunExecutor
-import com.intellij.execution.runners.ExecutionEnvironment
+import com.intellij.execution.runners.ExecutionEnvironmentBuilder
 import com.intellij.openapi.application.WriteAction
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.testFramework.runInEdtAndWait
-import com.nhaarman.mockitokotlin2.doReturn
-import com.nhaarman.mockitokotlin2.mock
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.After
@@ -24,6 +22,7 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials
 import software.aws.toolkits.jetbrains.core.credentials.MockCredentialsManager
 import software.aws.toolkits.jetbrains.utils.rules.HeavyJavaCodeInsightTestFixtureRule
 import software.aws.toolkits.resources.message
+import kotlin.test.assertNotNull
 
 class RemoteLambdaRunConfigurationTest {
     @Rule
@@ -67,7 +66,7 @@ class RemoteLambdaRunConfigurationTest {
             assertThat(runConfiguration).isNotNull
             assertThatThrownBy { runConfiguration.checkConfiguration() }
                 .isInstanceOf(RuntimeConfigurationError::class.java)
-                .hasMessage(message("lambda.run_configuration.no_region_specified"))
+                .hasMessage(message("configure.validate.no_region_specified"))
     }
 
     @Test
@@ -203,12 +202,32 @@ class RemoteLambdaRunConfigurationTest {
         }
     }
 
-    private fun getState(runConfiguration: LambdaRemoteRunConfiguration): RemoteLambdaState {
-        val executor = ExecutorRegistry.getInstance().getExecutorById(DefaultRunExecutor.EXECUTOR_ID)
-        val environmentMock = mock<ExecutionEnvironment> {
-            on { project } doReturn projectRule.project
-            on { getExecutor() } doReturn executor
+    @Test // https://github.com/aws/aws-toolkit-jetbrains/issues/1072
+    fun creatingACopyDoesNotAliasFields() {
+        runInEdtAndWait {
+            val runConfiguration = createRunConfiguration(
+                project = projectRule.project,
+                input = "{}"
+            )
+
+            val clonedConfiguration = runConfiguration.clone() as RemoteLambdaRunConfiguration
+            clonedConfiguration.name = "Cloned"
+
+            clonedConfiguration.useInputText("Changed input")
+
+            assertThat(clonedConfiguration.inputSource()).isNotEqualTo(runConfiguration.inputSource())
         }
-        return runConfiguration.getState(executor, environmentMock)
+    }
+
+    private fun getState(runConfiguration: RemoteLambdaRunConfiguration): RemoteLambdaState {
+        val executor = ExecutorRegistry.getInstance().getExecutorById(DefaultRunExecutor.EXECUTOR_ID)
+        assertNotNull(executor)
+
+        val environment = ExecutionEnvironmentBuilder.create(
+            DefaultRunExecutor.getRunExecutorInstance(),
+            runConfiguration
+        ).build()
+
+        return runConfiguration.getState(executor, environment)
     }
 }

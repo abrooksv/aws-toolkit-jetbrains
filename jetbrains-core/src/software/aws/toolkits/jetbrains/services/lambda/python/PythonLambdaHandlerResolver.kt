@@ -7,6 +7,7 @@ import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleUtilCore
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.ModuleRootManager
+import com.intellij.openapi.roots.TestSourcesFilter
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.NavigatablePsiElement
 import com.intellij.psi.PsiDirectory
@@ -42,7 +43,7 @@ class PythonLambdaHandlerResolver : LambdaHandlerResolver {
         val moduleFolders = fullyQualifiedModule.take(fullyQualifiedModule.size - 1)
 
         // Find the module by the name
-        PyModuleNameIndex.find(moduleFile, project, true).forEach { pyModule ->
+        PyModuleNameIndex.find(moduleFile, project, false).forEach { pyModule ->
             val lambdaFunctionCandidate = pyModule.findTopLevelFunction(functionName) ?: return@forEach
 
             val module = ModuleUtilCore.findModuleForFile(lambdaFunctionCandidate.containingFile)
@@ -90,10 +91,12 @@ class PythonLambdaHandlerResolver : LambdaHandlerResolver {
                 return true
             }
 
-            return false
+            if (rootVirtualFile.findChild("requirements.txt") != null) {
+                return true
+            }
         }
 
-        return true
+        return false
     }
 
     private fun directoryHasInitPy(psiDirectory: PsiDirectory) = psiDirectory.findFile("__init__.py") != null
@@ -102,8 +105,18 @@ class PythonLambdaHandlerResolver : LambdaHandlerResolver {
         if (element.node?.elementType != PyTokenTypes.IDENTIFIER) {
             return null
         }
+        val project = element.project
         val function = element.parent as? PyFunction ?: return null
-        if (function.parent is PyFile && function.parameterList.parameters.size == 2) {
+        val virtualFile = element.containingFile.virtualFile ?: return null
+
+        if (function.parent is PyFile &&
+            function.parameterList.parameters.size == 2 &&
+            // Ignore files that are considered test sources. Ignore the IDE warning, it uses IDE extension points.
+            !TestSourcesFilter.isTestSources(virtualFile, project) &&
+            // ignore pytest tests: they start with test_ by convention:
+            // https://pytest.readthedocs.io/en/reorganize-docs/new-docs/user/naming_conventions.html#id1
+            function.name?.startsWith("test_") != true
+        ) {
             return function.qualifiedName
         }
         return null

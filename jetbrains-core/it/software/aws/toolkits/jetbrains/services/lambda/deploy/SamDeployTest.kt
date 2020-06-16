@@ -3,12 +3,7 @@
 
 package software.aws.toolkits.jetbrains.services.lambda.deploy
 
-import com.intellij.execution.OutputListener
-import com.intellij.execution.configurations.GeneralCommandLine
-import com.intellij.execution.process.OSProcessHandler
-import com.intellij.execution.process.ProcessEvent
 import com.intellij.openapi.util.Disposer
-import com.intellij.openapi.util.Key
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.testFramework.runInEdtAndGet
 import com.intellij.util.ExceptionUtil
@@ -25,21 +20,22 @@ import software.aws.toolkits.core.region.AwsRegion
 import software.aws.toolkits.core.rules.S3TemporaryBucketRule
 import software.aws.toolkits.jetbrains.core.credentials.MockProjectAccountSettingsManager
 import software.aws.toolkits.jetbrains.core.credentials.runUnderRealCredentials
-import software.aws.toolkits.jetbrains.settings.SamSettings
 import software.aws.toolkits.jetbrains.utils.rules.HeavyJavaCodeInsightTestFixtureRule
+import software.aws.toolkits.jetbrains.utils.setSamExecutableFromEnvironment
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class SamDeployTest {
     private val s3Client = S3Client.builder()
-            .httpClient(ApacheHttpClient.builder().build())
-            .region(Region.US_WEST_2)
-            .build()
+        .httpClient(ApacheHttpClient.builder().build())
+        .region(Region.US_WEST_2)
+        .serviceConfiguration { it.pathStyleAccessEnabled(true) }
+        .build()
 
     private val cfnClient = CloudFormationClient.builder()
-            .httpClient(ApacheHttpClient.builder().build())
-            .region(Region.US_WEST_2)
-            .build()
+        .httpClient(ApacheHttpClient.builder().build())
+        .region(Region.US_WEST_2)
+        .build()
 
     @Rule
     @JvmField
@@ -51,9 +47,9 @@ class SamDeployTest {
 
     @Before
     fun setUp() {
-        SamSettings.getInstance().savedExecutablePath = System.getenv().getOrDefault("SAM_CLI_EXEC", "sam")
-        MockProjectAccountSettingsManager.getInstance(projectRule.project).activeRegion =
-                AwsRegion(Region.US_WEST_2.id(), "us-west-2")
+        setSamExecutableFromEnvironment()
+
+        MockProjectAccountSettingsManager.getInstance(projectRule.project).changeRegion(AwsRegion(Region.US_WEST_2.id(), "us-west-2", "aws"))
     }
 
     @Test
@@ -145,26 +141,16 @@ class SamDeployTest {
     private fun createChangeSet(templateFile: VirtualFile, stackName: String, parameters: Map<String, String> = emptyMap()): String? {
         val deployDialog = runInEdtAndGet {
             runUnderRealCredentials(projectRule.project) {
-                object : SamDeployDialog(
+                SamDeployDialog(
                     projectRule.project,
                     stackName,
                     templateFile,
                     parameters,
                     bucketRule.createBucket(stackName),
                     false,
-                    true
-                ) {
-                    override fun createProcess(command: GeneralCommandLine): OSProcessHandler =
-                        super.createProcess(command).also {
-                            it.addProcessListener(
-                                object : OutputListener() {
-                                    override fun onTextAvailable(event: ProcessEvent, outputType: Key<*>) {
-                                        super.onTextAvailable(event, outputType)
-                                        println("SAM CLI: ${event.text}")
-                                    }
-                                })
-                        }
-                }.also {
+                    true,
+                    CreateCapabilities.values().toList()
+                ).also {
                     Disposer.register(projectRule.fixture.testRootDisposable, it.disposable)
                 }
             }

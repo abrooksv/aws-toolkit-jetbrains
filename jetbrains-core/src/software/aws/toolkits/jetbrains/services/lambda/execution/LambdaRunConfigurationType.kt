@@ -7,8 +7,9 @@ import com.intellij.execution.configurations.ConfigurationTypeBase
 import com.intellij.execution.configurations.ConfigurationTypeUtil
 import icons.AwsIcons
 import software.aws.toolkits.jetbrains.core.help.HelpIds
+import software.aws.toolkits.jetbrains.services.lambda.LambdaHandlerResolver
 import software.aws.toolkits.jetbrains.services.lambda.execution.local.LocalLambdaRunConfigurationFactory
-import software.aws.toolkits.jetbrains.services.lambda.execution.remote.LambdaRemoteRunConfigurationFactory
+import software.aws.toolkits.jetbrains.services.lambda.execution.remote.RemoteLambdaRunConfigurationFactory
 import software.aws.toolkits.resources.message
 
 class LambdaRunConfigurationType :
@@ -19,8 +20,13 @@ class LambdaRunConfigurationType :
         AwsIcons.Resources.LAMBDA_FUNCTION
     ) {
     init {
-        addFactory(LocalLambdaRunConfigurationFactory(this))
-        addFactory(LambdaRemoteRunConfigurationFactory(this))
+        // Although it should work, isApplicable doesn't seem to work for locallambdarunconfigurationfactory
+        // and it still shows up when it is not applicalbe. So we have to decide in the configuration to add it or not.
+        // TODO see if this is resolvable
+        if (LambdaHandlerResolver.supportedRuntimeGroups.isNotEmpty()) {
+            addFactory(LocalLambdaRunConfigurationFactory(this))
+        }
+        addFactory(RemoteLambdaRunConfigurationFactory(this))
     }
 
     override fun getHelpTopic(): String? = HelpIds.RUN_DEBUG_CONFIGURATIONS_DIALOG.id

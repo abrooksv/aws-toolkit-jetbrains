@@ -21,14 +21,15 @@ data class Partitions(val partitions: List<Partition>) {
 
 data class Partition(
     val partition: String,
+    val partitionName: String,
     val regions: Map<String, PartitionRegion>,
     val services: Map<String, Service>
 )
 
 data class PartitionRegion(val description: String)
 
-data class Service(val endpoints: Map<String, Endpoint>, val isRegionalized: Boolean?) {
-    val isGlobal = isRegionalized == false
+data class Service(val endpoints: Map<String, Endpoint>, val isRegionalized: Boolean?, val partitionEndpoint: String?) {
+    val isGlobal = isRegionalized != true && partitionEndpoint != null
 }
 
 class Endpoint
@@ -49,7 +50,7 @@ object PartitionParser {
 
 object ServiceEndpointResource : RemoteResource {
     override val urls: List<String> = listOf(
-        "http://idetoolkits.amazonwebservices.com/endpoints.json",
+        "https://idetoolkits.amazonwebservices.com/endpoints.json",
         "https://aws-toolkit-endpoints.s3.amazonaws.com/endpoints.json"
     )
     override val name: String = "service-endpoints.json"

@@ -3,12 +3,19 @@ version: 0.2
 env:
   variables:
     CI: true
+    LOCAL_ENV_RUN: true
 
 phases:
   install:
+    runtime-versions:
+      java: openjdk11
+      dotnet: 2.2
+
     commands:
-      - choco install -y --no-progress codecov
-      - choco install -y --no-progress dotnetcore-sdk --version 2.2.104
+      - |
+        if(-Not($Env:CODE_COV_TOKEN -eq $null)) {
+            choco install -y --no-progress codecov
+        }
       - choco install -y --no-progress netfx-4.6.1-devpack
 
   build:
@@ -18,6 +25,26 @@ phases:
   post_build:
     commands:
       - |
+        $script:TEST_ARTIFACTS=Join-Path $env:TEMP testArtifacts
+        $script:TEST_REPORTS=Join-Path $script:TEST_ARTIFACTS test-reports
+
+        function copyFolder($basedir, $subdir, $destdir) {
+          $src = Join-Path "." -ChildPath $basedir | Join-Path -ChildPath $subdir
+          $dest = Join-Path $destdir -ChildPath $basedir | Join-Path -ChildPath $subDir
+          if( (Get-ChildItem $src -ErrorAction SilentlyContinue | Measure-Object).Count -ne 0) {
+            Copy-Item $src $dest -Recurse -Force -ErrorAction SilentlyContinue
+          }
+        }
+
+        function copyArtifacts($root) {
+            copyFolder $root "build/reports/" $script:TEST_ARTIFACTS
+            copyFolder $root "build/idea-sandbox/system-test/log/" $script:TEST_ARTIFACTS
+            copyFolder $root "build/test-results/test/" $script:TEST_REPORTS
+        }
+
+        copyArtifacts "."
+        Get-ChildItem -Directory | ForEach-Object { copyArtifacts $_.Name }
+
         if(-Not($Env:CODEBUILD_BUILD_SUCCEEDING -eq "0" -Or $Env:CODE_COV_TOKEN -eq $null)) {
           $env:VCS_COMMIT_ID=$Env:CODEBUILD_RESOLVED_SOURCE_VERSION;
           $env:CI_BUILD_URL=[uri]::EscapeUriString($Env:CODEBUILD_BUILD_URL);
@@ -27,3 +54,15 @@ phases:
             -f "build/reports/jacoco/coverageReport/coverageReport.xml" `
             -c $Env:CODEBUILD_RESOLVED_SOURCE_VERSION
         }
+
+reports:
+  unit-test:
+    files:
+      - "**/*"
+    base-directory: "$env:TEMP/testArtifacts/test-reports"
+    discard-paths: yes
+
+artifacts:
+    base-directory: "$env:TEMP/testArtifacts"
+    files:
+        - "**/*"

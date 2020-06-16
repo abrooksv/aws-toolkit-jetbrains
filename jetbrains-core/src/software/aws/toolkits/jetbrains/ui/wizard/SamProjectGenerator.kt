@@ -12,10 +12,9 @@ import com.intellij.ide.util.projectWizard.WebProjectTemplate
 import com.intellij.openapi.application.runInEdt
 import com.intellij.openapi.application.runWriteAction
 import com.intellij.openapi.module.Module
+import com.intellij.openapi.project.DefaultProjectFactory
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.projectRoots.Sdk
 import com.intellij.openapi.roots.ModuleRootManager
-import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.intellij.openapi.ui.ValidationInfo
 import com.intellij.openapi.vfs.VirtualFile
@@ -25,19 +24,13 @@ import com.intellij.platform.HideableProjectGenerator
 import com.intellij.platform.ProjectGeneratorPeer
 import com.intellij.platform.ProjectTemplate
 import icons.AwsIcons
-import software.amazon.awssdk.services.lambda.model.Runtime
+import software.aws.toolkits.jetbrains.core.credentials.ProjectAccountSettingsManager
 import software.aws.toolkits.jetbrains.core.help.HelpIds
+import software.aws.toolkits.jetbrains.services.lambda.SamNewProjectSettings
+import software.aws.toolkits.jetbrains.services.lambda.SamProjectTemplate
 import software.aws.toolkits.resources.message
 import javax.swing.Icon
 import javax.swing.JComponent
-
-class SamNewProjectSettings {
-    lateinit var runtime: Runtime
-    var sdk: Sdk? = null
-    lateinit var template: SamProjectTemplate
-}
-
-val NOOP_CALLBACK = object : AbstractNewProjectStep.AbstractCallback<SamNewProjectSettings>() {}
 
 // ref: https://github.com/JetBrains/intellij-plugins/blob/master/vuejs/src/org/jetbrains/vuejs/cli/VueCliProjectGenerator.kt
 class SamProjectGenerator : ProjectTemplate,
@@ -45,28 +38,50 @@ class SamProjectGenerator : ProjectTemplate,
                             DirectoryProjectGenerator<SamNewProjectSettings>,
                             CustomStepProjectGenerator<SamNewProjectSettings>,
                             HideableProjectGenerator {
-    val settings = SamNewProjectSettings()
-    val step = SamProjectRuntimeSelectionStep(this, NOOP_CALLBACK)
-    val peer = SamProjectGeneratorSettingsPeer(this)
     val builder = SamProjectBuilder(this)
+    val step = SamProjectRuntimeSelectionStep(this)
+    val peer = SamProjectGeneratorSettingsPeer(this)
 
-    override fun isHidden(): Boolean = false
+    // Stable source-creating project for creating new SAM application and making API calls safely,
+    // as AWSToolkit assumes across the board it's operating with an active project
+    // Independent of lastUsedProject because it may not be set,
+    // or could be disposed if the user chooses to create a new project in the same window as their previous
+    val defaultSourceCreatingProject = createDefaultSourceCreatingProject()
+
+    // Only show the generator if we have SAM templates to show
+    override fun isHidden(): Boolean = SamProjectTemplate.SAM_TEMPLATES.isEmpty()
 
     // steps are used by non-IntelliJ IDEs
-    override fun createStep(projectGenerator: DirectoryProjectGenerator<SamNewProjectSettings>?, callback: AbstractNewProjectStep.AbstractCallback<SamNewProjectSettings>?): AbstractActionWithPanel = step
+    override fun createStep(
+        projectGenerator: DirectoryProjectGenerator<SamNewProjectSettings>?,
+        callback: AbstractNewProjectStep.AbstractCallback<SamNewProjectSettings>?
+    ): AbstractActionWithPanel = step
 
     // non-IntelliJ project commit step
-    override fun generateProject(project: Project, baseDir: VirtualFile, settings: SamNewProjectSettings, module: Module) {
-        peer.sdkPanel.ensureSdk()
+    override fun generateProject(
+        project: Project,
+        baseDir: VirtualFile,
+        settings: SamNewProjectSettings,
+        module: Module
+    ) {
         runInEdt {
+            val rootModel = ModuleRootManager.getInstance(module).modifiableModel
+            val builder = createModuleBuilder()
+            builder.contentEntryPath = baseDir.path
+            builder.setupRootModel(rootModel)
+
             runWriteAction {
-                val rootModel = ModuleRootManager.getInstance(module).modifiableModel
-                val builder = createModuleBuilder()
-                builder.contentEntryPath = baseDir.path
-                builder.setupRootModel(rootModel)
                 rootModel.commit()
             }
         }
+    }
+
+    private fun createDefaultSourceCreatingProject(): Project {
+        val newDefaultProject = DefaultProjectFactory.getInstance().defaultProject
+
+        // Explicitly eager load ProjectAccountSettingsManager for the project to subscribe to credential change events
+        ProjectAccountSettingsManager.getInstance(newDefaultProject)
+        return newDefaultProject
     }
 
     // the peer is in control of the first pane
@@ -94,33 +109,28 @@ class SamProjectGenerator : ProjectTemplate,
 
 // non-IntelliJ step UI
 class SamProjectRuntimeSelectionStep(
-    private val projectGenerator: SamProjectGenerator,
-    callback: AbstractNewProjectStep.AbstractCallback<SamNewProjectSettings>
-) : ProjectSettingsStepBase<SamNewProjectSettings>(projectGenerator, callback) {
+    projectGenerator: SamProjectGenerator
+) : ProjectSettingsStepBase<SamNewProjectSettings>(
+    projectGenerator,
+    AbstractNewProjectStep.AbstractCallback<SamNewProjectSettings>()
+) {
     fun getLocationField(): TextFieldWithBrowseButton = myLocationField
-    private fun getGeneratorPeer(): SamProjectGeneratorSettingsPeer = (projectGenerator.step.peer as SamProjectGeneratorSettingsPeer)
 
     override fun registerValidators() {
         super.registerValidators()
-        getGeneratorPeer().registerValidators()
+        (peer as SamProjectGeneratorSettingsPeer).registerValidators()
     }
 }
 
-class SamProjectGeneratorSettingsPeer(private val generator: SamProjectGenerator) : ProjectGeneratorPeer<SamNewProjectSettings> {
-    private val templateComboBox = ComboBox<SamProjectTemplate>()
-    private val basePanel = SamInitSelectionPanel(settings)
-    val sdkPanel: SdkSelectionPanelImpl by lazy { SdkSelectionPanelImpl(generator) }
+class SamProjectGeneratorSettingsPeer(val generator: SamProjectGenerator) : ProjectGeneratorPeer<SamNewProjectSettings> {
+    private val samInitSelectionPanel by lazy { SamInitSelectionPanel(generator) }
 
     /**
      * This hook is used in PyCharm and is called via {@link SamProjectBuilder#modifySettingsStep} for IntelliJ
      */
-    override fun validate(): ValidationInfo? {
-        val validationErrors = sdkPanel.validateAll()
+    override fun validate(): ValidationInfo? = samInitSelectionPanel.validate()
 
-        return basePanel.validate() ?: validationErrors?.firstOrNull()
-    }
-
-    override fun getSettings(): SamNewProjectSettings = generator.settings
+    override fun getSettings(): SamNewProjectSettings = samInitSelectionPanel.newProjectSettings
 
     // "Deprecated" but required to implement. Not importing to avoid the import deprecation warning.
     @Suppress("OverridingDeprecatedMember", "DEPRECATION")
@@ -129,24 +139,17 @@ class SamProjectGeneratorSettingsPeer(private val generator: SamProjectGenerator
     // we sacrifice a lot of convenience so we can build the UI here...
     override fun buildUI(settingsStep: SettingsStep) {
         // delegate to another panel instead of trying to write UI as code
-        sdkPanel.transformUI(basePanel)
-
-        settingsStep.addSettingsComponent(basePanel.mainPanel)
+        settingsStep.addSettingsComponent(component)
     }
 
     // order matters! we build the peer UI before we build the step UI,
     // so validators should be done after BOTH have been constructed
     fun registerValidators() {
         // register any IDE-specific behavior
-        // sdk selector validation
-        sdkPanel.registerListeners()
-
-        // generic
-        // register changes into our settings holder
-        templateComboBox.addItemListener { settings.template = (it.item as SamProjectTemplate) }
+        samInitSelectionPanel.registerValidators()
     }
 
     override fun isBackgroundJobRunning(): Boolean = false
 
-    override fun getComponent(): JComponent = sdkPanel.sdkSelectionPanel
+    override fun getComponent(): JComponent = samInitSelectionPanel.mainPanel
 }

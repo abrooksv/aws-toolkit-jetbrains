@@ -1,71 +1,144 @@
 static def ideProfiles() {
     return [
-            "2018.3": [
-                    "IC": [
-                            version: "IC-2018.3.5",
-                            plugins: [
-                                    "yaml",
-                                    "PythonCore:2018.3.183.4284.148",
-                                    "gradle",
-                                    "maven",
-                                    "properties" // Used by Maven
-                            ]
+        "2019.3": [
+            "guiTestFramework": "com.intellij.testGuiFramework:193.SNAPSHOT.1@nightly",
+            "sinceVersion": "193",
+            "untilVersion": "193.*",
+            "products": [
+                "IC": [
+                    sdkVersion: "IC-2019.3",
+                    plugins: [
+                        "org.jetbrains.plugins.terminal",
+                        "org.jetbrains.plugins.yaml",
+                        "PythonCore:193.5233.139",
+                        "java",
+                        "com.intellij.gradle",
+                        "org.jetbrains.idea.maven",
+                        "Docker:193.5233.140"
                     ]
-            ],
-            "2019.1": [
-                    "IC": [
-                            version: "IC-2019.1",
-                            plugins: [
-                                    "yaml",
-                                    "PythonCore:2019.1.191.6183.53",
-                                    "gradle",
-                                    "maven",
-                                    "properties" // Used by Maven
-                            ]
+                ],
+                "IU": [
+                    sdkVersion: "IU-2019.3",
+                    plugins: [
+                        "org.jetbrains.plugins.terminal",
+                        "Pythonid:193.5233.109",
+                        "org.jetbrains.plugins.yaml",
+                        "JavaScript",
+                        "JavaScriptDebugger",
                     ]
-            ],
-            "2019.2": [
-                    "IC": [
-                            version: "192.4488.21-EAP-SNAPSHOT",
-                            plugins: [
-                                    "yaml",
-                                    "PythonCore:2019.2.192.4488.21",
-                                    "gradle",
-                                    "maven",
-                                    "properties" // Used by Maven
-                            ]
-                    ],
-                    "RD": [
-                            version: "RD-2019.2-SNAPSHOT",
-                            plugins: [
-                                    "yaml"
-                            ]
+                ],
+                "RD": [
+                    sdkVersion: "RD-2019.3.4",
+                    rdGenVersion: "0.193.146",
+                    nugetVersion: "2019.3.4",
+                    plugins: [
+                        "org.jetbrains.plugins.yaml"
                     ]
+                ]
             ]
+        ],
+        "2020.1": [
+            "sinceVersion": "201",
+            "untilVersion": "201.*",
+            "products": [
+                "IC": [
+                    sdkVersion: "IC-2020.1",
+                    plugins: [
+                        "org.jetbrains.plugins.terminal",
+                        "org.jetbrains.plugins.yaml",
+                        "PythonCore:201.6668.31",
+                        "java",
+                        "com.intellij.gradle",
+                        "org.jetbrains.idea.maven",
+                        "Docker:201.6668.30"
+                    ]
+                ],
+                "IU": [
+                    sdkVersion: "IU-2020.1",
+                    plugins: [
+                        "org.jetbrains.plugins.terminal",
+                        "Pythonid:201.6668.31",
+                        "org.jetbrains.plugins.yaml",
+                        "JavaScript",
+                        "JavaScriptDebugger",
+                    ]
+                ],
+                "RD": [
+                    sdkVersion: "RD-2020.1-SNAPSHOT",
+                    rdGenVersion: "0.201.69",
+                    nugetVersion: "2020.1.0-eap05",
+                    plugins: [
+                        "org.jetbrains.plugins.yaml"
+                    ]
+                ]
+            ]
+        ]
     ]
 }
 
 def idePlugins(String productCode) {
-    def product = ideProfile().getAt(productCode)
-    if (product == null) {
-        throw IllegalArgumentException("Unknown IDE product `$productCode` for ${resolveIdeProfileName()}")
-    }
-    return product.plugins
+    return ideProduct(productCode).plugins
 }
 
-def ideVersion(String productCode) {
-    def product = ideProfile()[productCode]
+def ideSdkVersion(String productCode) {
+    return ideProduct(productCode).sdkVersion
+}
+
+private def ideProduct(String productCode) {
+    def product = ideProfile()["products"][productCode]
     if (product == null) {
-        throw IllegalArgumentException("Unknown IDE product `$productCode` for ${resolveIdeProfileName()}")
+        throw new IllegalArgumentException("Unknown IDE product `$productCode` for ${resolveIdeProfileName()}")
     }
-    return product.version
+    return product
+}
+
+def ideSinceVersion() {
+    def guiVersion = ideProfile()["sinceVersion"]
+    if (guiVersion == null) {
+        throw new IllegalArgumentException("Missing 'sinceVersion' key for ${resolveIdeProfileName()}")
+    }
+    return guiVersion
+}
+
+def ideUntilVersion() {
+    def guiVersion = ideProfile()["untilVersion"]
+    if (guiVersion == null) {
+        throw new IllegalArgumentException("Missing 'untilVersion' key for ${resolveIdeProfileName()}")
+    }
+    return guiVersion
+}
+
+def guiTestFramework() {
+    def guiVersion = ideProfile()["guiTestFramework"]
+    if (guiVersion == null) {
+        throw new IllegalArgumentException("Missing 'guiTestFramework' key for ${resolveIdeProfileName()}")
+    }
+    return guiVersion
+}
+
+// https://www.myget.org/feed/rd-snapshots/package/maven/com.jetbrains.rd/rd-gen
+def rdGenVersion() {
+    def rdGen = ideProduct("RD").rdGenVersion
+    if (rdGen == null) {
+        throw new IllegalArgumentException("Missing 'rdGenVersion' in 'RD' product for ${resolveIdeProfileName()}")
+    }
+    return rdGen
+}
+
+// https://www.nuget.org/packages/JetBrains.Rider.SDK/
+def riderNugetSdkVersion() {
+    def rdGen = ideProduct("RD").nugetVersion
+    if (rdGen == null) {
+        throw new IllegalArgumentException("Missing 'nugetVersion' in 'RD' product for ${resolveIdeProfileName()}")
+    }
+    return rdGen
 }
 
 def ideProfile() {
     def profileName = resolveIdeProfileName()
     def profile = ideProfiles()[profileName]
     if (profile == null) {
-        throw IllegalArgumentException("Unknown ideProfile `$profileName`")
+        throw new IllegalArgumentException("Unknown ideProfile `$profileName`")
     }
 
     return profile
@@ -79,10 +152,27 @@ def resolveIdeProfileName() {
     return project.ideProfileName
 }
 
+
+static def shortenVersion(String ver) {
+    try {
+        def result = ver =~ /^\d\d(\d{2})[\\.](\d)/
+        if (result) {
+            return result.group(1) + result.group(2)
+        }
+    } catch(Exception ignored) { }
+    return ver
+}
+
 ext {
     ideProfiles = this.&ideProfiles
     idePlugins = this.&idePlugins
-    ideVersion = this.&ideVersion
+    ideSdkVersion = this.&ideSdkVersion
+    ideSinceVersion = this.&ideSinceVersion
+    ideUntilVersion = this.&ideUntilVersion
     ideProfile = this.&ideProfile
+    guiTestFramework = this.&guiTestFramework
+    rdGenVersion = this.&rdGenVersion
+    riderNugetSdkVersion = this.&riderNugetSdkVersion
     resolveIdeProfileName = this.&resolveIdeProfileName
+    shortenVersion = this.&shortenVersion
 }

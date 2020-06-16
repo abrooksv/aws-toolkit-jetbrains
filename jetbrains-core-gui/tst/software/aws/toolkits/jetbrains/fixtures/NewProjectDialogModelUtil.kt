@@ -1,4 +1,4 @@
-// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 package software.aws.toolkits.jetbrains.fixtures
@@ -12,10 +12,13 @@ import com.intellij.testGuiFramework.util.scenarios.NewProjectDialogModel.Consta
 import com.intellij.testGuiFramework.util.scenarios.assertProjectPathExists
 import com.intellij.testGuiFramework.util.scenarios.connectDialog
 import com.intellij.testGuiFramework.util.scenarios.fileSystemUtils
+import com.intellij.testGuiFramework.util.scenarios.selectProjectGroup
 import com.intellij.testGuiFramework.util.scenarios.selectSdk
 import com.intellij.testGuiFramework.util.scenarios.typeProjectNameAndLocation
 import com.intellij.testGuiFramework.util.scenarios.waitLoadingTemplates
 import com.intellij.testGuiFramework.util.step
+import java.util.Arrays
+import kotlin.test.assertNotNull
 
 private const val AWS_GROUP = "AWS"
 
@@ -24,7 +27,7 @@ data class ServerlessProjectOptions(val runtime: String, val template: String)
 fun NewProjectDialogModel.createServerlessProject(
     projectPath: String,
     templateOptions: ServerlessProjectOptions,
-    projectSdk: String
+    sdkRegex: Regex
 ) {
     with(guiTestCase) {
         fileSystemUtils.assertProjectPathExists(projectPath)
@@ -56,14 +59,33 @@ fun NewProjectDialogModel.createServerlessProject(
                     combobox("SAM Template:").selectItem(templateOptions.template)
                 }
 
-                if (projectSdk.isNotEmpty()) {
-                    selectSdk(projectSdk)
-                }
+                val sdkCandidates = sdkChooser().contents()
+                val sdkChoice = sdkCandidates.firstOrNull { it.matches(sdkRegex) }
+                assertNotNull(sdkChoice, "No valid SDK found, choices are: ${Arrays.toString(sdkCandidates)}")
+                selectSdk(sdkChoice)
 
                 step("close New Project dialog with Finish") {
                     button(buttonFinish).click()
                     waitTillGone()
                 }
+            }
+        }
+    }
+}
+
+fun NewProjectDialogModel.createEmptyProject(projectPath: String) {
+    with(connectDialog()) {
+        selectProjectGroup(NewProjectDialogModel.Groups.Empty)
+        button(buttonNext).click()
+        typeProjectNameAndLocation(projectPath)
+        button(buttonFinish).click()
+    }
+
+    with(guiTestCase) {
+        ideFrame {
+            waitForBackgroundTasksToFinish()
+            dialog("Project Structure") {
+                button(NewProjectDialogModel.Constants.buttonCancel).click()
             }
         }
     }

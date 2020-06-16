@@ -10,49 +10,40 @@ import com.intellij.execution.process.ProcessAdapter
 import com.intellij.execution.process.ProcessEvent
 import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.runners.ExecutionEnvironment
-import com.intellij.execution.ui.ConsoleView
-import com.intellij.execution.ui.ConsoleViewContentType
-import com.intellij.execution.ui.ExecutionConsole
 import com.intellij.openapi.rd.defineNestedLifetime
-import com.intellij.xdebugger.XDebugProcess
+import com.intellij.util.net.NetUtils
 import com.intellij.xdebugger.XDebugProcessStarter
-import com.intellij.xdebugger.XDebugSession
-import com.jetbrains.rd.framework.IProtocol
 import com.jetbrains.rd.framework.IdKind
 import com.jetbrains.rd.framework.Identities
 import com.jetbrains.rd.framework.Protocol
 import com.jetbrains.rd.framework.Serializers
 import com.jetbrains.rd.framework.SocketWire
-import com.jetbrains.rd.util.lifetime.Lifetime
 import com.jetbrains.rd.util.lifetime.isAlive
 import com.jetbrains.rd.util.lifetime.onTermination
 import com.jetbrains.rd.util.put
 import com.jetbrains.rd.util.reactive.adviseUntil
 import com.jetbrains.rdclient.protocol.RdDispatcher
-import com.jetbrains.rider.RiderEnvironment
-import com.jetbrains.rider.debugger.DebuggerWorkerPlatform
-import com.jetbrains.rider.debugger.DotNetDebugProcess
-import com.jetbrains.rider.debugger.DotNetDebugRunner
 import com.jetbrains.rider.debugger.RiderDebuggerWorkerModelManager
-import com.jetbrains.rider.debugger.actions.utils.OptionsUtil
 import com.jetbrains.rider.model.debuggerWorker.DotNetCoreExeStartInfo
 import com.jetbrains.rider.model.debuggerWorker.DotNetCoreInfo
 import com.jetbrains.rider.model.debuggerWorker.DotNetDebuggerSessionModel
 import com.jetbrains.rider.model.debuggerWorkerConnectionHelperModel
 import com.jetbrains.rider.projectView.solution
-import com.jetbrains.rider.run.ConsoleKind
 import com.jetbrains.rider.run.IDebuggerOutputListener
 import com.jetbrains.rider.run.bindToSettings
 import org.jetbrains.concurrency.AsyncPromise
 import org.jetbrains.concurrency.Promise
+import software.amazon.awssdk.services.lambda.model.Runtime
 import software.aws.toolkits.core.utils.error
 import software.aws.toolkits.core.utils.getLogger
 import software.aws.toolkits.core.utils.trace
 import software.aws.toolkits.jetbrains.services.lambda.execution.local.SamDebugSupport
 import software.aws.toolkits.jetbrains.services.lambda.execution.local.SamRunningState
+import software.aws.toolkits.jetbrains.utils.DotNetDebuggerUtils
 import software.aws.toolkits.resources.message
 import java.io.File
 import java.io.OutputStream
+import java.net.InetAddress
 import java.util.Timer
 import kotlin.concurrent.schedule
 
@@ -82,54 +73,60 @@ class DotNetSamDebugSupport : SamDebugSupport {
     companion object {
         private val logger = getLogger<DotNetSamDebugSupport>()
 
-        const val DEBUGGER_LAUNCHER_NAME = "JetBrains.Rider.Debugger.Launcher"
         private const val DEBUGGER_MODE = "server"
 
         private const val REMOTE_DEBUGGER_DIR = "/tmp/lambci_debug_files"
         private const val REMOTE_NETCORE_CLI_PATH = "/var/lang/bin/dotnet"
         private const val REMOTE_LAMBDA_COMPILED_PATH = "/var/runtime/MockBootstraps.dll"
+        private const val NUMBER_OF_DEBUG_PORTS = 2
     }
 
-    private val debuggerAssemblyFile =
-        RiderEnvironment.getBundledFile(DebuggerWorkerPlatform.AnyCpu.assemblyName)
-
-    private val debuggerBinDirectory = debuggerAssemblyFile.parentFile
+    override fun getDebugPorts(): List<Int> = NetUtils.findAvailableSocketPorts(NUMBER_OF_DEBUG_PORTS).toList()
 
     /**
      * Check whether the JatBrains.Rider.Worker.Launcher app (that is required to run Debugger) is downloaded into Rider SDK.
      */
-    override fun isSupported(): Boolean {
-        val debugLauncherFile = File(debuggerBinDirectory, "$DEBUGGER_LAUNCHER_NAME.dll")
+    override fun isSupported(runtime: Runtime): Boolean {
+        // TODO: Remove when SAM adds debug support
+        if (runtime == Runtime.DOTNETCORE3_1) {
+            return false
+        }
+
+        val debugLauncherFile = File(DotNetDebuggerUtils.debuggerBinDir, "${DotNetDebuggerUtils.dotnetCoreDebuggerLauncherName}.dll")
 
         val debuggerLauncherExists = debugLauncherFile.exists()
         if (!debuggerLauncherExists) {
-            logger.error { "$DEBUGGER_LAUNCHER_NAME runnable does not exists" }
+            logger.error { "${DotNetDebuggerUtils.dotnetCoreDebuggerLauncherName} runnable does not exists" }
         }
         return debuggerLauncherExists
     }
 
-    override fun patchCommandLine(debugPort: Int, state: SamRunningState, commandLine: GeneralCommandLine) {
+    override fun patchCommandLine(debugPorts: List<Int>, commandLine: GeneralCommandLine) {
+        val frontendPort = debugPorts[0]
+        val backendPort = debugPorts[1]
+
         val debugArgs = StringBuilder()
-            .append("$REMOTE_DEBUGGER_DIR/$DEBUGGER_LAUNCHER_NAME.dll ")
+            .append("$REMOTE_DEBUGGER_DIR/${DotNetDebuggerUtils.dotnetCoreDebuggerLauncherName}.dll ")
             .append("$REMOTE_DEBUGGER_DIR/runtime.sh ")
-            .append("$REMOTE_DEBUGGER_DIR/${debuggerAssemblyFile.name} ")
+            .append("$REMOTE_DEBUGGER_DIR/${DotNetDebuggerUtils.debuggerAssemblyFile.name} ")
             .append("$DEBUGGER_MODE ")
-            .append("$debugPort ")
-            .append("$debugPort")
+            .append("$frontendPort ")
+            .append("$backendPort")
             .toString()
 
         commandLine.withParameters("--debugger-path")
-                .withParameters(debuggerBinDirectory.path)
-                .withParameters("--debug-args")
-                .withParameters(debugArgs)
+            .withParameters(DotNetDebuggerUtils.debuggerBinDir.path)
+            .withParameters("--debug-args")
+            .withParameters(debugArgs)
 
-        super.patchCommandLine(debugPort, state, commandLine)
+        super.patchCommandLine(debugPorts, commandLine)
     }
 
     override fun createDebugProcess(
         environment: ExecutionEnvironment,
         state: SamRunningState,
-        debugPort: Int
+        debugHost: String,
+        debugPorts: List<Int>
     ): XDebugProcessStarter? {
         throw UnsupportedOperationException("Use 'createDebugProcessAsync' instead")
     }
@@ -137,8 +134,12 @@ class DotNetSamDebugSupport : SamDebugSupport {
     override fun createDebugProcessAsync(
         environment: ExecutionEnvironment,
         state: SamRunningState,
-        debugPort: Int
+        debugHost: String,
+        debugPorts: List<Int>
     ): Promise<XDebugProcessStarter?> {
+        val frontendPort = debugPorts[0]
+        val backendPort = debugPorts[1]
+
         val promise = AsyncPromise<XDebugProcessStarter?>()
         val project = environment.project
 
@@ -149,11 +150,13 @@ class DotNetSamDebugSupport : SamDebugSupport {
         val scheduler = RdDispatcher(debuggerLifetime)
         val startInfo = createNetCoreStartInfo(state)
 
+        val debugHostAddress = InetAddress.getByName(debugHost)
+
         val protocol = Protocol(
             serializers = Serializers(),
             identity = Identities(IdKind.Client),
             scheduler = scheduler,
-            wire = SocketWire.Client(debuggerLifetime, scheduler, port = debugPort, optId = "FrontendToDebugWorker"),
+            wire = SocketWire.Client(debuggerLifetime, scheduler, hostAddress = debugHostAddress, port = frontendPort, optId = "FrontendToDebugWorker"),
             lifetime = debuggerLifetime
         )
 
@@ -176,7 +179,7 @@ class DotNetSamDebugSupport : SamDebugSupport {
                     environment.project.solution.debuggerWorkerConnectionHelperModel.ports.put(
                         debuggerLifetime,
                         environment.executionId,
-                        debugPort
+                        backendPort
                     )
 
                     val sessionModel = DotNetDebuggerSessionModel(startInfo)
@@ -225,7 +228,7 @@ class DotNetSamDebugSupport : SamDebugSupport {
                     }
 
                     promise.setResult(
-                        createAndStartSession(
+                        DotNetDebuggerUtils.createAndStartSession(
                             executionConsole = console,
                             env = environment,
                             sessionLifetime = debuggerLifetime,
@@ -270,38 +273,4 @@ class DotNetSamDebugSupport : SamDebugSupport {
             useExternalConsole = false,
             needToBeInitializedImmediately = true
         )
-
-    private fun createAndStartSession(
-        executionConsole: ExecutionConsole,
-        env: ExecutionEnvironment,
-        sessionLifetime: Lifetime,
-        processHandler: ProcessHandler,
-        protocol: IProtocol,
-        sessionModel: DotNetDebuggerSessionModel,
-        outputEventsListener: IDebuggerOutputListener
-    ): XDebugProcessStarter {
-        val consoleKind = ConsoleKind.ExternalConsole
-        (executionConsole as? ConsoleView)
-            ?.print(
-                "Input/Output redirection disabled: ${consoleKind.message}${System.lineSeparator()}",
-                ConsoleViewContentType.SYSTEM_OUTPUT
-            )
-
-        val fireInitializedManually = env.getUserData(DotNetDebugRunner.FIRE_INITIALIZED_MANUALLY) ?: false
-
-        return object : XDebugProcessStarter() {
-            override fun start(session: XDebugSession): XDebugProcess =
-                DotNetDebugProcess(
-                    sessionLifetime = sessionLifetime,
-                    session = session,
-                    debuggerWorkerProcessHandler = processHandler,
-                    console = executionConsole,
-                    protocol = protocol,
-                    sessionProxy = sessionModel,
-                    fireInitializedManually = fireInitializedManually,
-                    customListener = outputEventsListener,
-                    debugKind = OptionsUtil.toDebugKind(sessionModel.sessionProperties.debugKind.valueOrNull),
-                    project = env.project)
-        }
-    }
 }

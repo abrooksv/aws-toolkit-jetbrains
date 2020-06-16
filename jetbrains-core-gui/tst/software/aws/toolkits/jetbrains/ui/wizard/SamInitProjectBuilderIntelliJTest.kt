@@ -15,6 +15,7 @@ import com.intellij.testGuiFramework.util.step
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
+import software.aws.toolkits.core.utils.test.retryableAssert
 import software.aws.toolkits.jetbrains.fixtures.ServerlessProjectOptions
 import software.aws.toolkits.jetbrains.fixtures.checkLibraryPrefixPresent
 import software.aws.toolkits.jetbrains.fixtures.checkProject
@@ -30,7 +31,7 @@ class SamInitProjectBuilderIntelliJTest(private val testParameters: TestParamete
     data class TestParameters(
         val runtime: String,
         val templateName: String,
-        val sdk: String,
+        val sdkRegex: Regex,
         val libraries: Set<String> = emptySet(),
         val runConfigNames: Set<String> = emptySet()
     ) : Serializable {
@@ -44,7 +45,7 @@ class SamInitProjectBuilderIntelliJTest(private val testParameters: TestParamete
             newProjectDialogModel.createServerlessProject(
                 projectFolder,
                 ServerlessProjectOptions(testParameters.runtime, testParameters.templateName),
-                testParameters.sdk
+                testParameters.sdkRegex
             )
         }
 
@@ -66,7 +67,7 @@ class SamInitProjectBuilderIntelliJTest(private val testParameters: TestParamete
 
                             step("check the project SDK is correct") {
                                 projectStructureDialogModel.checkProject {
-                                    sdkChooser().requireSelection("${testParameters.sdk}.*".toPattern())
+                                    sdkChooser().requireSelection(testParameters.sdkRegex.toPattern())
                                 }
                             }
                         }
@@ -85,7 +86,9 @@ class SamInitProjectBuilderIntelliJTest(private val testParameters: TestParamete
             }
 
             step("check the run configuration is created") {
-                assertTrue(runConfigurationList.getRunConfigurationList().containsAll(testParameters.runConfigNames))
+                retryableAssert {
+                    assertTrue(runConfigurationList.getRunConfigurationList().containsAll(testParameters.runConfigNames))
+                }
             }
 
             step("check the default README.md file is open in editor") {
@@ -101,21 +104,28 @@ class SamInitProjectBuilderIntelliJTest(private val testParameters: TestParamete
             TestParameters(
                 runtime = "java8",
                 templateName = "AWS SAM Hello World (Maven)",
-                sdk = "1.8",
+                sdkRegex = """.*(1\.8|11).*""".toRegex(),
                 libraries = setOf("Maven: com.amazonaws:aws-lambda-java-core:"),
                 runConfigNames = setOf("[Local] HelloWorldFunction")
             ),
             TestParameters(
                 runtime = "java8",
                 templateName = "AWS SAM Hello World (Gradle)",
-                sdk = "1.8",
+                sdkRegex = """.*(1\.8|11).*""".toRegex(),
+                libraries = setOf("Gradle: com.amazonaws:aws-lambda-java-core:"),
                 runConfigNames = setOf("[Local] HelloWorldFunction")
             ),
             TestParameters(
                 runtime = "python3.6",
                 templateName = "AWS SAM Hello World",
-                sdk = "Python",
+                sdkRegex = "Python.*".toRegex(),
                 runConfigNames = setOf("[Local] HelloWorldFunction")
+            ),
+            TestParameters(
+                runtime = "python3.6",
+                templateName = "AWS SAM DynamoDB Event Example",
+                sdkRegex = "Python.*".toRegex(),
+                runConfigNames = setOf("[Local] ReadDynamoDBEvent")
             )
         )
     }

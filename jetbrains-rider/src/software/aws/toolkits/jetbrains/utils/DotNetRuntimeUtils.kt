@@ -43,4 +43,15 @@ object DotNetRuntimeUtils {
         return Runtime.fromValue("dotnetcore${version.split('.').take(2).joinToString(".")}").validOrNull
             ?: DEFAULT_DOTNET_CORE_RUNTIME
     }
+
+    const val RUNTIME_CONFIG_JSON_21 = """{
+  "runtimeOptions": {
+    "tfm": "netcoreapp2.1",
+    "framework": {
+      "name": "Microsoft.NETCore.App",
+      "version": "2.1.0"
+    },
+    "rollForward": "Major"
+  }
+}"""
 }

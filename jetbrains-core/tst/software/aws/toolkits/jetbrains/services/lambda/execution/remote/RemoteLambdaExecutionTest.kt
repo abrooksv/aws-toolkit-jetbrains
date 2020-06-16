@@ -16,6 +16,7 @@ import com.nhaarman.mockitokotlin2.any
 import com.nhaarman.mockitokotlin2.argumentCaptor
 import com.nhaarman.mockitokotlin2.doReturn
 import com.nhaarman.mockitokotlin2.doThrow
+import com.nhaarman.mockitokotlin2.stub
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.Before
 import org.junit.Rule
@@ -30,11 +31,11 @@ import software.amazon.awssdk.services.lambda.model.LogType
 import software.aws.toolkits.jetbrains.core.MockClientManagerRule
 import software.aws.toolkits.jetbrains.core.credentials.MockCredentialsManager
 import software.aws.toolkits.jetbrains.core.region.MockRegionProvider
-import software.aws.toolkits.jetbrains.utils.delegateMock
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
+import kotlin.test.assertNotNull
 
 class RemoteLambdaExecutionTest {
     @Rule
@@ -58,15 +59,13 @@ class RemoteLambdaExecutionTest {
         val functionError = "Some error"
 
         val requestCaptor = argumentCaptor<InvokeRequest>()
-        val lambdaClient = delegateMock<LambdaClient> {
+        mockClientManager.create<LambdaClient>().stub {
             on { invoke(requestCaptor.capture()) } doReturn InvokeResponse.builder()
                 .logResult(Base64.getEncoder().encodeToString(logMessage.toByteArray()))
                 .payload(SdkBytes.fromString(responsePayload, StandardCharsets.UTF_8))
                 .functionError(functionError)
                 .build()
         }
-
-        mockClientManager.register(LambdaClient::class, lambdaClient)
 
         val output = executeLambda()
 
@@ -85,11 +84,9 @@ class RemoteLambdaExecutionTest {
         val input = "InputText"
 
         val requestCaptor = argumentCaptor<InvokeRequest>()
-        val lambdaClient = delegateMock<LambdaClient> {
+        mockClientManager.create<LambdaClient>().stub {
             on { invoke(requestCaptor.capture()) } doReturn InvokeResponse.builder().build()
         }
-
-        mockClientManager.register(LambdaClient::class, lambdaClient)
 
         executeLambda(inputText = input)
         val request = requestCaptor.firstValue
@@ -103,11 +100,9 @@ class RemoteLambdaExecutionTest {
         inputFile.writeText(input)
 
         val requestCaptor = argumentCaptor<InvokeRequest>()
-        val lambdaClient = delegateMock<LambdaClient> {
+        mockClientManager.create<LambdaClient>().stub {
             on { invoke(requestCaptor.capture()) } doReturn InvokeResponse.builder().build()
         }
-
-        mockClientManager.register(LambdaClient::class, lambdaClient)
 
         executeLambda(inputText = inputFile.absolutePath, inputFile = true)
         val request = requestCaptor.firstValue
@@ -117,11 +112,9 @@ class RemoteLambdaExecutionTest {
     @Test
     fun serviceException() {
         val dummyMessage = "Dummy Exception"
-        val lambdaClient = delegateMock<LambdaClient> {
+        mockClientManager.create<LambdaClient>().stub {
             on { invoke(any<InvokeRequest>()) } doThrow LambdaException.builder().message(dummyMessage).build()
         }
-
-        mockClientManager.register(LambdaClient::class, lambdaClient)
 
         val output = executeLambda()
 
@@ -135,10 +128,11 @@ class RemoteLambdaExecutionTest {
             inputIsFile = inputFile,
             credentialId = CREDENTIAL_ID,
             functionName = FUNCTION_NAME,
-            regionId = MockRegionProvider.US_EAST_1
+            regionId = MockRegionProvider.getInstance().defaultRegion()
         )
 
         val executor = ExecutorRegistry.getInstance().getExecutorById(DefaultRunExecutor.EXECUTOR_ID)
+        assertNotNull(executor)
         val executionEnvironment = ExecutionEnvironmentBuilder.create(executor, runConfiguration).build()
         val executionFuture = CompletableFuture<Output>()
         runInEdt {

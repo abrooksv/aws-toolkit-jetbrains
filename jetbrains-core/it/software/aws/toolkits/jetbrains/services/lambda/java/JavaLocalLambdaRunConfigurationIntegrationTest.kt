@@ -5,26 +5,40 @@ package software.aws.toolkits.jetbrains.services.lambda.java
 
 import com.intellij.compiler.CompilerTestUtil
 import com.intellij.execution.executors.DefaultDebugExecutor
-import com.intellij.psi.PsiJavaFile
 import com.intellij.testFramework.runInEdtAndWait
-import com.intellij.xdebugger.XDebuggerUtil
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.junit.runners.Parameterized
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials
+import software.amazon.awssdk.services.lambda.model.Runtime
 import software.aws.toolkits.jetbrains.core.credentials.MockCredentialsManager
 import software.aws.toolkits.jetbrains.services.lambda.execution.local.createHandlerBasedRunConfiguration
 import software.aws.toolkits.jetbrains.services.lambda.execution.local.createTemplateRunConfiguration
-import software.aws.toolkits.jetbrains.services.lambda.sam.checkBreakPointHit
-import software.aws.toolkits.jetbrains.services.lambda.sam.executeLambda
-import software.aws.toolkits.jetbrains.settings.SamSettings
+import software.aws.toolkits.jetbrains.utils.addBreakpoint
+import software.aws.toolkits.jetbrains.utils.checkBreakPointHit
+import software.aws.toolkits.jetbrains.utils.executeRunConfiguration
 import software.aws.toolkits.jetbrains.utils.rules.HeavyJavaCodeInsightTestFixtureRule
 import software.aws.toolkits.jetbrains.utils.rules.addClass
 import software.aws.toolkits.jetbrains.utils.rules.addModule
+import software.aws.toolkits.jetbrains.utils.setSamExecutableFromEnvironment
+import software.aws.toolkits.jetbrains.utils.setUpGradleProject
+import software.aws.toolkits.jetbrains.utils.setUpJdk
 
-class JavaLocalLambdaRunConfigurationIntegrationTest {
+@RunWith(Parameterized::class)
+class JavaLocalLambdaRunConfigurationIntegrationTest(private val runtime: Runtime) {
+    companion object {
+        @JvmStatic
+        @Parameterized.Parameters(name = "{0}")
+        fun data(): Collection<Array<Runtime>> = listOf(
+            arrayOf(Runtime.JAVA8),
+            arrayOf(Runtime.JAVA11)
+        )
+    }
+
     @Rule
     @JvmField
     val projectRule = HeavyJavaCodeInsightTestFixtureRule()
@@ -34,7 +48,7 @@ class JavaLocalLambdaRunConfigurationIntegrationTest {
 
     @Before
     fun setUp() {
-        SamSettings.getInstance().savedExecutablePath = System.getenv()["SAM_CLI_EXEC"]
+        setSamExecutableFromEnvironment()
 
         val fixture = projectRule.fixture
         val module = fixture.addModule("main")
@@ -51,7 +65,15 @@ class JavaLocalLambdaRunConfigurationIntegrationTest {
             """
         )
 
-        projectRule.setUpGradleProject()
+        val compatibility = when (runtime) {
+            Runtime.JAVA8 -> "1.8"
+            Runtime.JAVA11 -> "11"
+            else -> throw NotImplementedError()
+        }
+
+        projectRule.setUpJdk()
+
+        projectRule.setUpGradleProject(compatibility)
 
         runInEdtAndWait {
             fixture.openFileInEditor(psiClass.containingFile.virtualFile)
@@ -70,12 +92,13 @@ class JavaLocalLambdaRunConfigurationIntegrationTest {
     fun samIsExecuted() {
         val runConfiguration = createHandlerBasedRunConfiguration(
             project = projectRule.project,
+            runtime = runtime,
             input = "\"Hello World\"",
             credentialsProviderId = mockId
         )
         assertThat(runConfiguration).isNotNull
 
-        val executeLambda = executeLambda(runConfiguration)
+        val executeLambda = executeRunConfiguration(runConfiguration)
 
         assertThat(executeLambda.exitCode).isEqualTo(0)
         assertThat(executeLambda.stdout).contains("HELLO WORLD")
@@ -91,7 +114,7 @@ class JavaLocalLambdaRunConfigurationIntegrationTest {
                 Properties:
                   Handler: com.example.LambdaHandler::handleRequest
                   CodeUri: main
-                  Runtime: java8
+                  Runtime: $runtime
                   Timeout: 900
         """.trimIndent()
         )
@@ -106,7 +129,7 @@ class JavaLocalLambdaRunConfigurationIntegrationTest {
 
         assertThat(runConfiguration).isNotNull
 
-        val executeLambda = executeLambda(runConfiguration)
+        val executeLambda = executeRunConfiguration(runConfiguration)
 
         assertThat(executeLambda.exitCode).isEqualTo(0)
         assertThat(executeLambda.stdout).contains("HELLO WORLD")
@@ -122,7 +145,7 @@ class JavaLocalLambdaRunConfigurationIntegrationTest {
                 Properties:
                   Handler: com.example.LambdaHandler::handleRequest
                   Code: main
-                  Runtime: java8
+                  Runtime: $runtime
                   Timeout: 900
         """.trimIndent()
         )
@@ -137,7 +160,7 @@ class JavaLocalLambdaRunConfigurationIntegrationTest {
 
         assertThat(runConfiguration).isNotNull
 
-        val executeLambda = executeLambda(runConfiguration)
+        val executeLambda = executeRunConfiguration(runConfiguration)
 
         assertThat(executeLambda.exitCode).isEqualTo(0)
         assertThat(executeLambda.stdout).contains("HELLO WORLD")
@@ -145,21 +168,11 @@ class JavaLocalLambdaRunConfigurationIntegrationTest {
 
     @Test
     fun samIsExecutedWithDebugger() {
-        runInEdtAndWait {
-            val document = projectRule.fixture.editor.document
-            val lambdaClass = projectRule.fixture.file as PsiJavaFile
-            val lambdaBody = lambdaClass.classes[0].allMethods[0].body!!.statements[0]
-            val lineNumber = document.getLineNumber(lambdaBody.textOffset)
-
-            XDebuggerUtil.getInstance().toggleLineBreakpoint(
-                projectRule.project,
-                projectRule.fixture.file.virtualFile,
-                lineNumber
-            )
-        }
+        projectRule.addBreakpoint()
 
         val runConfiguration = createHandlerBasedRunConfiguration(
             project = projectRule.project,
+            runtime = runtime,
             input = "\"Hello World\"",
             credentialsProviderId = mockId
         )
@@ -167,7 +180,7 @@ class JavaLocalLambdaRunConfigurationIntegrationTest {
 
         val debuggerIsHit = checkBreakPointHit(projectRule.project)
 
-        val executeLambda = executeLambda(runConfiguration, DefaultDebugExecutor.EXECUTOR_ID)
+        val executeLambda = executeRunConfiguration(runConfiguration, DefaultDebugExecutor.EXECUTOR_ID)
 
         assertThat(executeLambda.exitCode).isEqualTo(0)
         assertThat(executeLambda.stdout).contains("HELLO WORLD")

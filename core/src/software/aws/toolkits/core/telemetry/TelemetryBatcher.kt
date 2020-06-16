@@ -1,8 +1,11 @@
-// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 package software.aws.toolkits.core.telemetry
 
+import kotlinx.coroutines.runBlocking
+import org.jetbrains.annotations.TestOnly
+import software.amazon.awssdk.core.exception.SdkServiceException
 import software.aws.toolkits.core.utils.getLogger
 import software.aws.toolkits.core.utils.warn
 import java.util.concurrent.Executors
@@ -14,25 +17,24 @@ import java.util.concurrent.atomic.AtomicBoolean
 interface TelemetryBatcher {
     fun enqueue(event: MetricEvent)
 
-    fun enqueue(events: Collection<MetricEvent>)
-
     fun flush(retry: Boolean)
 
-    fun onTelemetryEnabledChanged(newValue: Boolean)
+    fun onTelemetryEnabledChanged(isEnabled: Boolean)
 
     fun shutdown()
 }
 
-open class DefaultTelemetryBatcher(
+class DefaultTelemetryBatcher(
     private val publisher: TelemetryPublisher,
     private val maxBatchSize: Int = DEFAULT_MAX_BATCH_SIZE,
     maxQueueSize: Int = DEFAULT_MAX_QUEUE_SIZE,
     private val executor: ScheduledExecutorService = createDefaultExecutor()
 ) : TelemetryBatcher {
-
     private val isTelemetryEnabled: AtomicBoolean = AtomicBoolean(false)
-    protected val eventQueue: LinkedBlockingDeque<MetricEvent> = LinkedBlockingDeque(maxQueueSize)
     private val isShuttingDown: AtomicBoolean = AtomicBoolean(false)
+
+    val eventQueue: LinkedBlockingDeque<MetricEvent> = LinkedBlockingDeque(maxQueueSize)
+        @TestOnly get
 
     init {
         executor.scheduleWithFixedDelay(
@@ -61,26 +63,21 @@ open class DefaultTelemetryBatcher(
     }
 
     override fun enqueue(event: MetricEvent) {
-        enqueue(listOf(event))
-    }
+        if (!isTelemetryEnabled.get()) {
+            return
+        }
 
-    override fun enqueue(events: Collection<MetricEvent>) {
         try {
-            eventQueue.addAll(events)
+            eventQueue.add(event)
         } catch (e: Exception) {
             LOG.warn(e) { "Failed to add metric to queue" }
         }
     }
 
-    override fun flush(retry: Boolean) {
-        flush(retry, isTelemetryEnabled.get())
-    }
-
-    // TODO: This should flush to disk instead of network on shutdown. User should not have to wait for network calls to exit. Also consider handling clock drift
     @Synchronized
-    private fun flush(retry: Boolean, publish: Boolean) {
-        if (!publish || !TELEMETRY_ENABLED) {
-            eventQueue.clear()
+    override fun flush(retry: Boolean) {
+        if (!isTelemetryEnabled.get()) {
+            return
         }
 
         while (!eventQueue.isEmpty()) {
@@ -90,23 +87,36 @@ open class DefaultTelemetryBatcher(
                 batch.add(eventQueue.pop())
             }
 
-            val publishSucceeded = try {
-                publisher.publish(batch)
-            } catch (e: Exception) {
-                LOG.warn(e) { "Failed to publish metrics" }
-                false
+            val stop = runBlocking {
+                try {
+                    publisher.publish(batch)
+                } catch (e: Exception) {
+                    LOG.warn(e) { "Failed to publish metrics" }
+                    val shouldRetry = retry && when (e) {
+                        is SdkServiceException -> e.statusCode() !in 400..499
+                        else -> true
+                    }
+                    if (shouldRetry) {
+                        LOG.warn { "Telemetry metrics failed to publish, retrying later..." }
+                        eventQueue.addAll(batch)
+                        // don't want an infinite loop...
+                        return@runBlocking true
+                    }
+                }
+                return@runBlocking false
             }
-
-            if (!publishSucceeded && retry) {
-                LOG.warn { "Telemetry metrics failed to publish, retrying later..." }
-                eventQueue.addAll(batch)
-                // don't want an infinite loop...
+            if (stop) {
                 return
             }
         }
     }
 
-    override fun onTelemetryEnabledChanged(newValue: Boolean) = isTelemetryEnabled.set(newValue)
+    override fun onTelemetryEnabledChanged(isEnabled: Boolean) {
+        isTelemetryEnabled.set(isEnabled)
+        if (!isEnabled) {
+            eventQueue.clear()
+        }
+    }
 
     companion object {
         private val LOG = getLogger<DefaultTelemetryBatcher>()
@@ -114,9 +124,6 @@ open class DefaultTelemetryBatcher(
         private const val DEFAULT_MAX_QUEUE_SIZE = 10000
         private const val DEFAULT_PUBLISH_INTERVAL = 5L
         private val DEFAULT_PUBLISH_INTERVAL_UNIT = TimeUnit.MINUTES
-
-        private const val TELEMETRY_KEY = "aws.toolkits.enableTelemetry"
-        val TELEMETRY_ENABLED = System.getProperty(TELEMETRY_KEY)?.toBoolean() ?: true
 
         private fun createDefaultExecutor() = Executors.newSingleThreadScheduledExecutor {
             val daemonThread = Thread(it)

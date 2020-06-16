@@ -4,6 +4,7 @@
 package software.aws.toolkits.jetbrains.core.credentials
 
 import com.intellij.icons.AllIcons
+import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.PlatformDataKeys
 import com.intellij.openapi.application.ApplicationManager
@@ -17,16 +18,15 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.vfs.LocalFileSystem
 import org.jetbrains.annotations.TestOnly
 import software.amazon.awssdk.profiles.ProfileFileLocation
-import software.aws.toolkits.jetbrains.components.telemetry.AnActionWrapper
-import software.aws.toolkits.jetbrains.core.credentials.profiles.ProfileCredentialProviderFactory
 import software.aws.toolkits.resources.message
+import software.aws.toolkits.telemetry.AwsTelemetry
 import java.io.File
 
 class CreateOrUpdateCredentialProfilesAction @TestOnly constructor(
     private val writer: ConfigFileWriter,
     private val configFile: File,
     private val credentialsFile: File
-) : AnActionWrapper(message("configure.toolkit.upsert_credentials.action")), DumbAware {
+) : AnAction(message("configure.toolkit.upsert_credentials.action")), DumbAware {
     @Suppress("unused")
     constructor() : this(
         DefaultConfigFileWriter,
@@ -36,7 +36,7 @@ class CreateOrUpdateCredentialProfilesAction @TestOnly constructor(
 
     private val localFileSystem = LocalFileSystem.getInstance()
 
-    override fun doActionPerformed(e: AnActionEvent) {
+    override fun actionPerformed(e: AnActionEvent) {
         val project = e.getRequiredData(PlatformDataKeys.PROJECT)
 
         // if both config and credential files do not exist, create a new config file
@@ -67,11 +67,12 @@ class CreateOrUpdateCredentialProfilesAction @TestOnly constructor(
                     }
                 }
 
-                fileEditorManager.openTextEditor(OpenFileDescriptor(project, it), true)
-                    ?: throw RuntimeException(message("credentials.could_not_open", it))
+                if (fileEditorManager.openTextEditor(OpenFileDescriptor(project, it), true) == null) {
+                    AwsTelemetry.openCredentials(project, success = false)
+                    throw RuntimeException(message("credentials.could_not_open", it))
+                }
+                AwsTelemetry.openCredentials(project, success = true)
             }
-
-            ProfileCredentialProviderFactory.profileWatcher.start()
         }
     }
 

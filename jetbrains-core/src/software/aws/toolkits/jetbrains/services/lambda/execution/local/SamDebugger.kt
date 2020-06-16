@@ -15,54 +15,31 @@ import org.jetbrains.concurrency.AsyncPromise
 import org.jetbrains.concurrency.Promise
 import software.aws.toolkits.core.utils.error
 import software.aws.toolkits.core.utils.getLogger
+import software.aws.toolkits.jetbrains.services.lambda.RuntimeGroup
 import software.aws.toolkits.jetbrains.utils.notifyError
 import software.aws.toolkits.resources.message
-import java.net.ServerSocket
 
-internal class SamDebugger : SamRunner() {
-
+internal class SamDebugger(runtimeGroup: RuntimeGroup) : SamRunner() {
     companion object {
         private val logger = getLogger<SamDebugger>()
     }
 
-    private val debugPort = findDebugPort()
+    private val debugExtension = SamDebugSupport.getInstanceOrThrow(runtimeGroup)
 
-    private fun findDebugPort(): Int {
-        try {
-            ServerSocket(0).use {
-                it.reuseAddress = true
-                return it.localPort
-            }
-        } catch (e: Exception) {
-            throw IllegalStateException("Failed to find free port", e)
-        }
-    }
+    private val debugPorts = debugExtension.getDebugPorts()
 
-    override fun patchCommandLine(state: SamRunningState, commandLine: GeneralCommandLine) {
-        SamDebugSupport.getInstanceOrThrow(state.settings.runtimeGroup)
-            .patchCommandLine(debugPort, state, commandLine)
+    override fun patchCommandLine(commandLine: GeneralCommandLine) {
+        debugExtension.patchCommandLine(debugPorts, commandLine)
     }
 
     override fun run(environment: ExecutionEnvironment, state: SamRunningState): Promise<RunContentDescriptor> {
-        val debugSupport = SamDebugSupport.getInstanceOrThrow(state.settings.runtimeGroup)
         val promise = AsyncPromise<RunContentDescriptor>()
-
-        try {
-            val exitValue = Runtime.getRuntime().exec("docker ps").waitFor()
-            if (exitValue != 0) {
-                promise.setError(message("lambda.debug.docker.not_connected"))
-                return promise
-            }
-        } catch (t: Throwable) {
-            promise.setError(t)
-            return promise
-        }
 
         var isDebuggerAttachDone = false
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(environment.project, message("lambda.debug.waiting"), false) {
             override fun run(indicator: ProgressIndicator) {
-                val debugAttachedResult = spinUntil(debugSupport.debuggerAttachTimeoutMs) { isDebuggerAttachDone }
+                val debugAttachedResult = spinUntil(debugExtension.debuggerAttachTimeoutMs) { isDebuggerAttachDone }
                 if (!debugAttachedResult) {
                     val message = message("lambda.debug.attach.fail")
                     logger.error { message }
@@ -71,7 +48,7 @@ internal class SamDebugger : SamRunner() {
             }
         })
 
-        debugSupport.createDebugProcessAsync(environment, state, debugPort)
+        debugExtension.createDebugProcessAsync(environment, state, state.settings.debugHost, debugPorts)
             .onSuccess { debugProcessStarter ->
                 val debugManager = XDebuggerManager.getInstance(environment.project)
                 val runContentDescriptor = debugProcessStarter?.let {

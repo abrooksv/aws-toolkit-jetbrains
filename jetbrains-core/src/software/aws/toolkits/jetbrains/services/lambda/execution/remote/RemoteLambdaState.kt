@@ -1,15 +1,12 @@
 // Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-@file:Suppress("DEPRECATION")
-
 package software.aws.toolkits.jetbrains.services.lambda.execution.remote
 
 import com.intellij.execution.DefaultExecutionResult
 import com.intellij.execution.ExecutionResult
 import com.intellij.execution.Executor
 import com.intellij.execution.configurations.RunProfileState
-import com.intellij.execution.configurations.SearchScopeProvider
 import com.intellij.execution.filters.TextConsoleBuilder
 import com.intellij.execution.filters.TextConsoleBuilderFactory
 import com.intellij.execution.process.ProcessHandler
@@ -19,25 +16,28 @@ import com.intellij.execution.runners.ProgramRunner
 import com.intellij.json.JsonLanguage
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.runInEdt
+import com.intellij.psi.search.GlobalSearchScopes
 import software.amazon.awssdk.core.SdkBytes
 import software.amazon.awssdk.services.lambda.LambdaClient
 import software.amazon.awssdk.services.lambda.model.LogType
 import software.aws.toolkits.jetbrains.core.AwsClientManager
 import software.aws.toolkits.jetbrains.utils.formatText
 import software.aws.toolkits.resources.message
+import software.aws.toolkits.telemetry.LambdaTelemetry
+import software.aws.toolkits.telemetry.Result
 import java.io.OutputStream
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 
 class RemoteLambdaState(
     private val environment: ExecutionEnvironment,
-    val settings: LambdaRemoteRunSettings
+    val settings: RemoteLambdaRunSettings
 ) : RunProfileState {
     private val consoleBuilder: TextConsoleBuilder
 
     init {
         val project = environment.project
-        val searchScope = SearchScopeProvider.createSearchScope(project, environment.runProfile)
+        val searchScope = GlobalSearchScopes.executionScope(project, environment.runProfile)
         consoleBuilder = TextConsoleBuilderFactory.getInstance().createBuilder(project, searchScope)
     }
 
@@ -68,6 +68,7 @@ class RemoteLambdaState(
     private fun invokeLambda(lambdaProcess: ProcessHandler) {
         val client = AwsClientManager.getInstance(environment.project)
             .getClient<LambdaClient>(settings.credentialProvider, settings.region)
+        var result = Result.Succeeded
 
         lambdaProcess.notifyTextAvailable(
             message("lambda.execute.invoke", settings.functionName) + '\n',
@@ -105,6 +106,7 @@ class RemoteLambdaState(
                 lambdaProcess.destroyProcess()
             }
         } catch (e: Exception) {
+            result = Result.Failed
             runInEdt {
                 lambdaProcess.notifyTextAvailable(
                     message("lambda.execute.service_error", e.message ?: "Unknown") + '\n',
@@ -113,6 +115,11 @@ class RemoteLambdaState(
 
                 lambdaProcess.destroyProcess()
             }
+        } finally {
+            LambdaTelemetry.invokeRemote(
+                project = environment.project,
+                result = result
+            )
         }
     }
 

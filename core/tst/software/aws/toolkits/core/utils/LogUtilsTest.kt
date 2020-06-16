@@ -41,7 +41,7 @@ class LogUtilsTest {
     @Test
     fun exceptionIsLoggedAndBubbledInTryOrThrow() {
         val expectedException = RuntimeException("Boom")
-        val exception = catch { log.tryOrThrow("message") { throw expectedException } }
+        val exception = catch { log.tryOrThrow<Unit>("message") { throw expectedException } }
         verify(log).error(any(), eq(expectedException))
         assertThat(exception === expectedException, equalTo(true))
     }
@@ -146,6 +146,13 @@ class LogUtilsTest {
         verify(log).error("error", exception)
         verify(log).warn("warn", null)
         verify(log).debug("debug", null)
+    }
+
+    @Test
+    fun logWhenNull() {
+        val result = log.logWhenNull("message", level = Level.WARN) { null }
+        verify(log).warn("message", null)
+        assertThat(result, equalTo(null))
     }
 
     @Before

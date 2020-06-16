@@ -3,273 +3,268 @@
 
 package software.aws.toolkits.jetbrains.core.credentials
 
-import com.intellij.openapi.Disposable
-import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.runInEdt
-import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.ServiceManager
-import com.intellij.openapi.components.State
-import com.intellij.openapi.components.Storage
 import com.intellij.openapi.project.Project
-import com.intellij.util.messages.MessageBus
+import com.intellij.openapi.util.SimpleModificationTracker
 import com.intellij.util.messages.Topic
-import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider
-import software.amazon.awssdk.regions.Region
-import software.amazon.awssdk.services.sts.StsClient
-import software.aws.toolkits.core.ToolkitClientManager
-import software.aws.toolkits.core.credentials.CredentialProviderNotFound
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.jetbrains.annotations.TestOnly
+import software.aws.toolkits.core.credentials.CredentialProviderNotFoundException
 import software.aws.toolkits.core.credentials.ToolkitCredentialsChangeListener
+import software.aws.toolkits.core.credentials.ToolkitCredentialsIdentifier
 import software.aws.toolkits.core.credentials.ToolkitCredentialsProvider
+import software.aws.toolkits.core.region.AwsPartition
 import software.aws.toolkits.core.region.AwsRegion
-import software.aws.toolkits.core.utils.tryOrNull
-import software.aws.toolkits.jetbrains.core.AwsAccountCache
-import software.aws.toolkits.jetbrains.core.AwsClientManager
-import software.aws.toolkits.jetbrains.core.AwsSdkClient
-import software.aws.toolkits.jetbrains.core.credentials.ProjectAccountSettingsManager.AccountSettingsChangedNotifier.AccountSettingsEvent
-import software.aws.toolkits.jetbrains.core.credentials.ProjectAccountSettingsManager.Companion.ACCOUNT_SETTINGS_CHANGED
-import software.aws.toolkits.jetbrains.core.credentials.profiles.ProfileToolkitCredentialsProviderFactory
+import software.aws.toolkits.core.utils.getLogger
+import software.aws.toolkits.core.utils.warn
+import software.aws.toolkits.jetbrains.core.AwsResourceCache
 import software.aws.toolkits.jetbrains.core.region.AwsRegionProvider
+import software.aws.toolkits.jetbrains.services.sts.StsResources
 import software.aws.toolkits.jetbrains.utils.MRUList
-import software.aws.toolkits.jetbrains.utils.createNotificationExpiringAction
-import software.aws.toolkits.jetbrains.utils.createShowMoreInfoDialogAction
-import software.aws.toolkits.jetbrains.utils.notifyWarn
 import software.aws.toolkits.resources.message
+import software.aws.toolkits.telemetry.AwsTelemetry
+import java.util.concurrent.CancellationException
 
-interface ProjectAccountSettingsManager {
-    /**
-     * Used to be notified about updates to the active account settings by subscribing to [ACCOUNT_SETTINGS_CHANGED]
-     */
-    interface AccountSettingsChangedNotifier {
-        data class AccountSettingsEvent(
-            val isLoading: Boolean,
-            val credentialsProvider: ToolkitCredentialsProvider?,
-            val region: AwsRegion
-        )
-
-        fun settingsChanged(event: AccountSettingsEvent)
-    }
-
-    /**
-     * Setting the active region will add to the recently used list, and evict the least recently used if at max size
-     */
-    val activeRegion: AwsRegion
-
-    /**
-     * Setting the active provider will add to the recently used list, and evict the least recently used if at max size
-     */
-    val activeCredentialProvider: ToolkitCredentialsProvider
-        @Throws(CredentialProviderNotFound::class) get
-
-    /**
-     * The underlying AWS account for current active credential provider. Return null if credential provider is not set.
-     * Calls of this member should be in non-UI thread since it makes network call using an STS client for retrieving the
-     * underlying AWS account.
-     */
-    val activeAwsAccount: String?
-
-    fun hasActiveCredentials(): Boolean = try {
-        activeCredentialProvider
-        true
-    } catch (_: CredentialProviderNotFound) {
-        false
-    }
-
-    /**
-     * Returns the list of recently used [AwsRegion]
-     */
-    fun recentlyUsedRegions(): List<AwsRegion>
-
-    /**
-     * Returns the list of recently used [ToolkitCredentialsProvider]
-     */
-    fun recentlyUsedCredentials(): List<ToolkitCredentialsProvider>
-
-    /**
-     * Attempts to change the active credential provider.
-     *
-     * 1. Broadcasts a [AccountSettingsChangedNotifier] with [AccountSettingsEvent.isLoading] set to true
-     * 2. Kicks off an STS callerIdentity call to validate the credentials work in the background
-     * 3. If call succeeds, make the requested provider active, broadcast [AccountSettingsEvent.activeCredentialsChanged]
-     * 4. If call fails, null out the active provider, broadcast [AccountSettingsEvent.activeCredentialsChanged]
-     */
-    fun changeCredentialProvider(credentialsProvider: ToolkitCredentialsProvider?)
-
-    /**
-     * Changes the active region and broadcasts out a [AccountSettingsEvent.activeRegionChanged]
-     */
-    fun changeRegion(region: AwsRegion)
-
-    companion object {
-        /***
-         * [MessageBus] topic for when the active credential profile or region is changed
-         */
-        val ACCOUNT_SETTINGS_CHANGED: Topic<ProjectAccountSettingsManager.AccountSettingsChangedNotifier> =
-            Topic.create(
-                "AWS Account setting changed",
-                ProjectAccountSettingsManager.AccountSettingsChangedNotifier::class.java
-            )
-
-        fun getInstance(project: Project): ProjectAccountSettingsManager =
-            ServiceManager.getService(project, ProjectAccountSettingsManager::class.java)
-    }
-}
-
-fun Project.activeRegion(): AwsRegion = ProjectAccountSettingsManager.getInstance(this).activeRegion
-fun Project.activeCredentialProvider(): ToolkitCredentialsProvider = ProjectAccountSettingsManager.getInstance(this).activeCredentialProvider
-fun Project.activeAwsAccount(): String? = ProjectAccountSettingsManager.getInstance(this).activeAwsAccount
-
-data class AccountState(
-    var activeProfile: String? = null,
-    var activeRegion: String = AwsRegionProvider.getInstance().defaultRegion().id,
-    var recentlyUsedProfiles: List<String> = mutableListOf(),
-    var recentlyUsedRegions: List<String> = mutableListOf()
-)
-
-@State(name = "accountSettings", storages = [Storage("aws.xml")])
-class DefaultProjectAccountSettingsManager(
-    private val project: Project,
-    private val stsClient: StsClient
-) : ProjectAccountSettingsManager, PersistentStateComponent<AccountState>, Disposable {
-
-    constructor(project: Project, sdkClient: AwsSdkClient) : this(
-        project,
-        ToolkitClientManager.createNewClient(
-            StsClient::class,
-            sdkClient.sdkHttpClient,
-            Region.US_EAST_1,
-            AnonymousCredentialsProvider.create(),
-            AwsClientManager.userAgent
-        )
-    )
-
-    private val awsAccountCache = AwsAccountCache.getInstance()
-    private val credentialManager = CredentialManager.getInstance()
+abstract class ProjectAccountSettingsManager(private val project: Project) : SimpleModificationTracker() {
+    private val resourceCache = AwsResourceCache.getInstance(project)
     private val regionProvider = AwsRegionProvider.getInstance()
 
-    // use internal fields so we can bypass the message bus, so we dont accidentally trigger a stack overflow
     @Volatile
-    private var activeRegionInternal: AwsRegion = regionProvider.defaultRegion()
+    private var validationJob: Job? = null
     @Volatile
-    private var activeProfileInternal: ToolkitCredentialsProvider? = null
-    private val recentlyUsedProfiles = MRUList<String>(MAX_HISTORY)
-    private val recentlyUsedRegions = MRUList<AwsRegion>(MAX_HISTORY)
-    private var isLoading = true
+    internal var connectionState: ConnectionState = ConnectionState.INITIALIZING
+        @TestOnly get
+
+    protected val recentlyUsedProfiles = MRUList<String>(MAX_HISTORY)
+    protected val recentlyUsedRegions = MRUList<String>(MAX_HISTORY)
+
+    // Internal state is visible for AwsSettingsPanel and ChangeAccountSettingsActionGroup
+    internal var selectedCredentialIdentifier: ToolkitCredentialsIdentifier? = null
+    internal var selectedPartition: AwsPartition? = null
+    internal var selectedRegion: AwsRegion? = null
+
+    private var selectedCredentialsProvider: ToolkitCredentialsProvider? = null
 
     init {
         ApplicationManager.getApplication().messageBus.connect(project)
             .subscribe(CredentialManager.CREDENTIALS_CHANGED, object : ToolkitCredentialsChangeListener {
-                override fun providerRemoved(providerId: String) {
-                    if (activeProfileInternal?.id == providerId) {
-                        changeCredentialProvider(null)
+                override fun providerRemoved(identifier: ToolkitCredentialsIdentifier) {
+                    if (selectedCredentialIdentifier == identifier) {
+                        changeConnectionSettings(null, selectedPartition, selectedRegion)
                     }
                 }
             })
     }
 
-    override val activeRegion: AwsRegion
-        get() = activeRegionInternal
+    fun isValidConnectionSettings(): Boolean = connectionState == ConnectionState.VALID
 
-    override val activeCredentialProvider: ToolkitCredentialsProvider
-        @Throws(CredentialProviderNotFound::class)
-        get() = activeProfileInternal ?: throw CredentialProviderNotFound(message("credentials.profile.not_configured"))
-
-    override val activeAwsAccount: String?
-        get() = if (hasActiveCredentials()) awsAccountCache.awsAccount(activeCredentialProvider) else null
-
-    override fun recentlyUsedRegions(): List<AwsRegion> = recentlyUsedRegions.elements()
-
-    override fun recentlyUsedCredentials(): List<ToolkitCredentialsProvider> = recentlyUsedProfiles
-        .elements()
-        .mapNotNull { getCredentialProviderOrNull(it) }
-
-    override fun getState(): AccountState = AccountState(
-        activeProfile = if (hasActiveCredentials()) activeCredentialProvider.id else null,
-        activeRegion = activeRegionInternal.id,
-        recentlyUsedProfiles = recentlyUsedProfiles.elements(),
-        recentlyUsedRegions = recentlyUsedRegions.elements().map { it.id }
-    )
-
-    override fun loadState(state: AccountState) {
-        activeRegionInternal = regionProvider.lookupRegionById(state.activeRegion)
-
-        state.recentlyUsedRegions.reversed()
-            .mapNotNull { regionProvider.regions()[it] }
-            .forEach { recentlyUsedRegions.add(it) }
-
-        state.recentlyUsedProfiles
-            .reversed()
-            .forEach { recentlyUsedProfiles.add(it) }
-
-        val activeProfile = state.activeProfile ?: ProfileToolkitCredentialsProviderFactory.DEFAULT_PROFILE_DISPLAY_NAME
-        getCredentialProviderOrNull(activeProfile)?.let { provider ->
-            changeCredentialProvider(provider)
+    fun connectionSettings(): ConnectionSettings? = selectedCredentialsProvider?.let { creds ->
+        selectedRegion?.let { region ->
+            ConnectionSettings(creds, region)
         }
     }
 
-    override fun changeCredentialProvider(credentialsProvider: ToolkitCredentialsProvider?) {
-        activeProfileInternal = null // Null it out while we verify them
+    /**
+     * Internal setter that allows for null values and is intended to set the internal state and still notify
+     */
+    protected fun changeConnectionSettings(identifier: ToolkitCredentialsIdentifier?, partition: AwsPartition?, region: AwsRegion?) {
+        changeFieldsAndNotify {
+            identifier?.let {
+                recentlyUsedProfiles.add(it.id)
+            }
 
-        if (credentialsProvider == null) {
-            broadcastChangeEvent()
-            return
+            region?.let {
+                recentlyUsedRegions.add(it.id)
+            }
+
+            selectedCredentialIdentifier = identifier
+            selectedPartition = partition
+            selectedRegion = region
         }
+    }
 
-        isLoading = true
-        recentlyUsedProfiles.add(credentialsProvider.id)
-        broadcastChangeEvent()
+    // TODO: Make this not null, few tests need to be fixed
+    /**
+     * Changes the credentials and then validates them. Notifies listeners of results
+     */
+    fun changeCredentialProvider(identifier: ToolkitCredentialsIdentifier?) {
+        changeFieldsAndNotify {
+            identifier?.let {
+                recentlyUsedProfiles.add(identifier.id)
+            }
 
-        ApplicationManager.getApplication().executeOnPooledThread {
+            selectedCredentialIdentifier = identifier
+        }
+    }
+
+    /**
+     * Changes the region and then validates them. Notifies listeners of results
+     */
+    fun changeRegion(region: AwsRegion) {
+        changeFieldsAndNotify {
+            region.let {
+                recentlyUsedRegions.add(region.id)
+            }
+            selectedRegion = region
+            selectedPartition = regionProvider.partitions()[region.partitionId]
+        }
+    }
+
+    /**
+     * Changes the partition and then validates them. Notifies listeners of results
+     */
+    fun changePartition(partition: AwsPartition) {
+        changeFieldsAndNotify {
+            selectedRegion = null
+            selectedPartition = partition
+        }
+    }
+
+    private fun changeFieldsAndNotify(fieldUpdateBlock: () -> Unit) {
+        incModificationCount()
+
+        connectionState = ConnectionState.VALIDATING
+        validationJob?.cancel(CancellationException("Newer connection settings chosen"))
+
+        // Clear existing provider
+        selectedCredentialsProvider = null
+
+        fieldUpdateBlock()
+
+        validationJob = GlobalScope.launch(Dispatchers.IO) {
+            broadcastChangeEvent(ConnectionSettingsStateChange(connectionState))
+
+            val credentialsIdentifier = selectedCredentialIdentifier
+            val region = selectedRegion
+            if (credentialsIdentifier == null || region == null) {
+                connectionState = ConnectionState.INVALID
+                broadcastChangeEvent(ConnectionSettingsStateChange(connectionState))
+                incModificationCount()
+                return@launch
+            }
+
             try {
-                credentialsProvider.getAwsAccount(stsClient)
-                activeProfileInternal = credentialsProvider
+                val credentialsProvider = CredentialManager.getInstance().getAwsCredentialProvider(credentialsIdentifier, region)
+
+                validate(credentialsProvider, region)
+                connectionState = ConnectionState.VALID
+                selectedCredentialsProvider = credentialsProvider
+
+                broadcastChangeEvent(ValidConnectionSettings(connectionState))
             } catch (e: Exception) {
-                val title = message("credentials.invalid.title")
-                val message = message("credentials.profile.validation_error", credentialsProvider.displayName)
-                notifyWarn(
-                    title = title,
-                    content = message,
-                    notificationActions = listOf(
-                        createShowMoreInfoDialogAction(
-                            message("credentials.invalid.more_info"),
-                            title,
-                            message,
-                            e.localizedMessage
-                        ),
-                        createNotificationExpiringAction(ActionManager.getInstance().getAction("aws.settings.upsertCredentials"))
-                    )
-                )
+                connectionState = ConnectionState.INVALID
+                LOGGER.warn(e) { message("credentials.profile.validation_error", credentialsIdentifier.displayName) }
+                broadcastChangeEvent(InvalidConnectionSettings(credentialsIdentifier, region, e, connectionState))
             } finally {
-                runInEdt {
-                    isLoading = false
-                    broadcastChangeEvent()
-                }
+                incModificationCount()
+                AwsTelemetry.validateCredentials(project, success = isValidConnectionSettings())
+                validationJob = null
             }
         }
     }
 
-    override fun changeRegion(region: AwsRegion) {
-        activeRegionInternal = region
-        recentlyUsedRegions.add(region)
-        broadcastChangeEvent()
+    /**
+     * Legacy method, should be considered deprecated and avoided since it loads defaults out of band
+     */
+    val activeRegion: AwsRegion
+        get() = selectedRegion ?: AwsRegionProvider.getInstance().defaultRegion().also {
+            LOGGER.warn(IllegalStateException()) { "Using activeRegion when region is null, calling code needs to be migrated to handle null" }
+        }
+
+    /**
+     * Legacy method, should be considered deprecated and avoided since it loads defaults out of band
+     */
+    val activeCredentialProvider: ToolkitCredentialsProvider
+        @Throws(CredentialProviderNotFoundException::class)
+        get() = selectedCredentialsProvider ?: throw CredentialProviderNotFoundException(message("credentials.profile.not_configured")).also {
+            LOGGER.warn(IllegalStateException()) { "Using activeCredentialProvider when credentials is null, calling code needs to be migrated to handle null" }
+        }
+
+    /**
+     * Returns the list of recently used [AwsRegion]
+     */
+    fun recentlyUsedRegions(): List<AwsRegion> = recentlyUsedRegions.elements().mapNotNull { regionProvider.allRegions()[it] }
+
+    /**
+     * Returns the list of recently used [ToolkitCredentialsIdentifier]
+     */
+    fun recentlyUsedCredentials(): List<ToolkitCredentialsIdentifier> {
+        val credentialManager = CredentialManager.getInstance()
+        return recentlyUsedProfiles.elements().mapNotNull { credentialManager.getCredentialIdentifierById(it) }
     }
 
-    override fun dispose() {
-        stsClient.close()
+    /**
+     * Internal method that executes the actual validation of credentials
+     */
+    protected open suspend fun validate(credentialsProvider: ToolkitCredentialsProvider, region: AwsRegion): Boolean = withContext(Dispatchers.IO) {
+        // TODO: Convert the cache over to suspend methods
+        resourceCache.getResourceNow(
+            StsResources.ACCOUNT,
+            region = region,
+            credentialProvider = credentialsProvider,
+            useStale = false,
+            forceFetch = true
+        )
+        true
     }
 
-    private fun getCredentialProviderOrNull(id: String): ToolkitCredentialsProvider? = tryOrNull {
-        credentialManager.getCredentialProvider(id)
-    }
-
-    private fun broadcastChangeEvent() {
-        val event = AccountSettingsEvent(isLoading, activeProfileInternal, activeRegionInternal)
+    private fun broadcastChangeEvent(event: ConnectionSettingsChangeEvent) {
         if (!project.isDisposed) {
-            project.messageBus.syncPublisher(ACCOUNT_SETTINGS_CHANGED).settingsChanged(event)
+            project.messageBus.syncPublisher(CONNECTION_SETTINGS_CHANGED).settingsChanged(event)
         }
     }
 
     companion object {
+        /***
+         * MessageBus topic for when the active credential profile or region is changed
+         */
+        val CONNECTION_SETTINGS_CHANGED: Topic<ConnectionSettingsChangeNotifier> = Topic.create(
+            "AWS Account setting changed",
+            ConnectionSettingsChangeNotifier::class.java
+        )
+
+        @JvmStatic
+        fun getInstance(project: Project): ProjectAccountSettingsManager = ServiceManager.getService(project, ProjectAccountSettingsManager::class.java)
+
+        private val LOGGER = getLogger<DefaultProjectAccountSettingsManager>()
         private const val MAX_HISTORY = 5
     }
 }
+
+enum class ConnectionState {
+    INITIALIZING,
+    VALIDATING,
+    INVALID,
+    VALID
+}
+
+interface ConnectionSettingsChangeNotifier {
+    fun settingsChanged(event: ConnectionSettingsChangeEvent)
+}
+
+sealed class ConnectionSettingsChangeEvent(val state: ConnectionState)
+class ConnectionSettingsStateChange(state: ConnectionState) : ConnectionSettingsChangeEvent(state)
+
+class InvalidConnectionSettings(
+    val credentialsProvider: ToolkitCredentialsIdentifier,
+    val region: AwsRegion,
+    val cause: Exception,
+    state: ConnectionState
+) : ConnectionSettingsChangeEvent(state)
+
+class ValidConnectionSettings(state: ConnectionState) : ConnectionSettingsChangeEvent(state)
+
+/**
+ * Legacy method, should be considered deprecated and avoided since it loads defaults out of band
+ */
+fun Project.activeRegion(): AwsRegion = ProjectAccountSettingsManager.getInstance(this).activeRegion
+
+/**
+ * Legacy method, should be considered deprecated and avoided since it loads defaults out of band
+ */
+fun Project.activeCredentialProvider(): ToolkitCredentialsProvider = ProjectAccountSettingsManager.getInstance(this).activeCredentialProvider
